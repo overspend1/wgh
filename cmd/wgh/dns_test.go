@@ -19,6 +19,19 @@ func TestPrintStatusDNS(t *testing.T) {
 	}
 }
 
+func TestPrintStatusIPv6(t *testing.T) {
+	var b bytes.Buffer
+	printStatus(&b, agent.Status{Name: "laptop", Address: "10.144.0.2", Address6: "fd77:6768::a90:2", Connected: true})
+	if !strings.HasPrefix(b.String(), "laptop  10.144.0.2  fd77:6768::a90:2  connected\n") {
+		t.Errorf("status:\n%s", b.String())
+	}
+	b.Reset()
+	printStatus(&b, agent.Status{Name: "laptop", Address: "10.144.0.2", Connected: true})
+	if !strings.HasPrefix(b.String(), "laptop  10.144.0.2  connected\n") {
+		t.Errorf("IPv4-only status:\n%s", b.String())
+	}
+}
+
 func TestUpRejectsBadDNSFlag(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.json")
 	if err := agent.Save(path, &agent.State{Name: "laptop", Address: "10.144.0.2", Subnet: "10.144.0.0/16"}); err != nil {

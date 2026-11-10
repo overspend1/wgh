@@ -38,7 +38,13 @@ func RenderHosts(current string, entries []HostEntry, domain string) string {
 	if len(entries) == 0 {
 		return out + "\n"
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	// By name, and a device's IPv4 line before its IPv6 one.
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].Name != entries[j].Name {
+			return entries[i].Name < entries[j].Name
+		}
+		return !strings.Contains(entries[i].Address, ":") && strings.Contains(entries[j].Address, ":")
+	})
 	var b strings.Builder
 	b.WriteString(out)
 	if out != "" {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -45,6 +46,12 @@ type Linux struct {
 	forward string // subnet forwarded, if any
 	natIf   string
 	filters map[string]*filterState // by interface, see SetFilter
+
+	// IPv6, see linux6.go.
+	v6       map[string]netip.Prefix // interfaces with their IPv6 address set
+	v6off    map[string]error        // why an interface asked for IPv6 has none
+	exit6    bool                    // the IPv6 half of SetExit is in place
+	forward6 string                  // IPv6 range forwarded, if any
 }
 
 // NewLinux returns a Linux backend that runs real commands.
@@ -75,7 +82,11 @@ func (l *Linux) Up(ifc Interface) error {
 	if mtu == 0 {
 		mtu = 1280 // safe through most tunnels and mobile networks
 	}
-	return l.run("ip", "link", "set", "dev", ifc.Name, "mtu", strconv.Itoa(mtu), "up")
+	if err := l.run("ip", "link", "set", "dev", ifc.Name, "mtu", strconv.Itoa(mtu), "up"); err != nil {
+		return err
+	}
+	l.up6(ifc) // never fails Up: without IPv6 the interface is IPv4 only
+	return nil
 }
 
 // Config renders the wg setconf file for ifc and peers.
@@ -158,7 +169,7 @@ func (l *Linux) SetRoutes(name string, routes []string) error {
 	var errs []error
 	for r := range l.routes {
 		if !want[r] {
-			if err := l.run("ip", "route", "del", r, "dev", name, "metric", "1000"); err != nil {
+			if err := l.run(routeCmd("del", r, name)...); err != nil {
 				errs = append(errs, err)
 			}
 			delete(l.routes, r)
@@ -173,7 +184,10 @@ func (l *Linux) SetRoutes(name string, routes []string) error {
 		if l.routes[r] {
 			continue
 		}
-		if err := l.run("ip", "route", "replace", r, "dev", name, "metric", "1000"); err != nil {
+		if isIPv6(r) && !l.v6[name].IsValid() {
+			continue // no IPv6 on the interface: added if it gets some
+		}
+		if err := l.run(routeCmd("replace", r, name)...); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -185,37 +199,68 @@ func (l *Linux) SetRoutes(name string, routes []string) error {
 // SetExit implements Backend with the same policy routing wg-quick uses for
 // a full tunnel: everything not marked as WireGuard's own traffic goes to a
 // table whose default route is the interface.
+//
+// With IPv6 on the interface the same table and rules are set up for IPv6
+// too. If that fails the whole exit node is turned off again rather than
+// leaving IPv6 traffic to go out past it.
 func (l *Linux) SetExit(name string, on bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if on == l.exit {
+	six := l.v6[name].IsValid()
+	if on == l.exit && (!on || l.exit6 == six) {
 		return nil
 	}
-	mark, table := fmt.Sprintf("0x%x", FwMark), strconv.Itoa(RouteTable)
-	if on {
-		for _, args := range [][]string{
-			{"ip", "-4", "route", "replace", "default", "dev", name, "table", table},
-			{"ip", "-4", "rule", "add", "not", "fwmark", mark, "table", table, "priority", "5767"},
-			{"ip", "-4", "rule", "add", "table", "main", "suppress_prefixlength", "0", "priority", "5766"},
-		} {
+	if !on {
+		l.exitOff(name, l.exit6)
+		l.exit = false
+		return nil
+	}
+	if !l.exit {
+		for _, args := range exitRules("-4", name) {
 			if err := l.run(args...); err != nil {
-				l.exitOff(name)
+				l.exitOff(name, false)
 				return err
 			}
 		}
 		l.exit = true
-		return nil
 	}
-	l.exitOff(name)
-	l.exit = false
+	if six && !l.exit6 {
+		for _, args := range exitRules("-6", name) {
+			if err := l.run(args...); err != nil {
+				l.exitOff(name, true)
+				l.exit = false
+				return fmt.Errorf("IPv6 exit routing, so the exit node stays off: %w", err)
+			}
+		}
+		l.exit6 = true
+	}
 	return nil
 }
 
-func (l *Linux) exitOff(name string) {
+// exitRules are the policy routing commands of SetExit for one family, "-4"
+// or "-6".
+func exitRules(fam, name string) [][]string {
+	mark, table := fmt.Sprintf("0x%x", FwMark), strconv.Itoa(RouteTable)
+	return [][]string{
+		{"ip", fam, "route", "replace", "default", "dev", name, "table", table},
+		{"ip", fam, "rule", "add", "not", "fwmark", mark, "table", table, "priority", "5767"},
+		{"ip", fam, "rule", "add", "table", "main", "suppress_prefixlength", "0", "priority", "5766"},
+	}
+}
+
+// exitOff undoes SetExit, the IPv6 half too when six is set.
+func (l *Linux) exitOff(name string, six bool) {
 	table := strconv.Itoa(RouteTable)
-	_ = l.run("ip", "-4", "rule", "del", "priority", "5767")
-	_ = l.run("ip", "-4", "rule", "del", "priority", "5766")
-	_ = l.run("ip", "-4", "route", "flush", "table", table)
+	fams := []string{"-4"}
+	if six {
+		fams = append(fams, "-6")
+	}
+	for _, fam := range fams {
+		_ = l.run("ip", fam, "rule", "del", "priority", "5767")
+		_ = l.run("ip", fam, "rule", "del", "priority", "5766")
+		_ = l.run("ip", fam, "route", "flush", "table", table)
+	}
+	l.exit6 = false
 }
 
 // SetForward implements Backend: IPv4 forwarding plus a MASQUERADE rule for
@@ -250,11 +295,17 @@ func (l *Linux) SetForward(name, subnet string, on bool) error {
 }
 
 func forwardRules(op, name, subnet string) [][]string {
+	return forwardRulesFor("iptables", op, name, subnet)
+}
+
+// forwardRulesFor are the forwarding and NAT rules, for iptables or
+// ip6tables.
+func forwardRulesFor(ipt, op, name, subnet string) [][]string {
 	c := []string{"-m", "comment", "--comment", "wgh"}
 	return [][]string{
-		append([]string{"iptables", "-w", op, "FORWARD", "-i", name, "-j", "ACCEPT"}, c...),
-		append([]string{"iptables", "-w", op, "FORWARD", "-o", name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"}, c...),
-		append([]string{"iptables", "-w", "-t", "nat", op, "POSTROUTING", "-s", subnet, "!", "-o", name, "-j", "MASQUERADE"}, c...),
+		append([]string{ipt, "-w", op, "FORWARD", "-i", name, "-j", "ACCEPT"}, c...),
+		append([]string{ipt, "-w", op, "FORWARD", "-o", name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"}, c...),
+		append([]string{ipt, "-w", "-t", "nat", op, "POSTROUTING", "-s", subnet, "!", "-o", name, "-j", "MASQUERADE"}, c...),
 	}
 }
 
@@ -269,17 +320,22 @@ func (l *Linux) forwardOff(name string) {
 func (l *Linux) Down(name string) error {
 	l.mu.Lock()
 	if l.exit {
-		l.exitOff(name)
+		l.exitOff(name, l.exit6)
 		l.exit = false
 	}
 	if l.forward != "" {
 		l.forwardOff(name)
 	}
+	if l.forward6 != "" {
+		l.forward6Off(name)
+	}
 	if f := l.filters[name]; f != nil {
-		l.filterOff(name, f.scope)
+		l.filterOff(name, f)
 		delete(l.filters, name)
 	}
 	l.routes = nil
+	delete(l.v6, name)
+	delete(l.v6off, name)
 	l.mu.Unlock()
 	if _, err := l.Run(nil, "ip", "link", "show", "dev", name); err != nil {
 		return nil // already gone

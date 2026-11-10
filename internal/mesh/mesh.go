@@ -21,6 +21,25 @@ import (
 // wgh can run next to Tailscale while you move devices over.
 const DefaultSubnet = "10.144.0.0/16"
 
+// DefaultSubnet6 is the IPv6 range inside the mesh, a unique local (ULA)
+// prefix. Each device's IPv6 address is derived from its IPv4 one (see
+// Addr6), so nothing new is stored or allocated.
+const DefaultSubnet6 = "fd77:6768::/64"
+
+// Addr6 is the mesh IPv6 address of the IPv4 mesh address v4: the
+// DefaultSubnet6 prefix with v4 as its last 32 bits, so 10.144.0.5 is
+// fd77:6768::a90:5. It returns "" for anything that is not an IPv4 address.
+func Addr6(v4 string) string {
+	a, err := netip.ParseAddr(v4)
+	if err != nil || !a.Is4() {
+		return ""
+	}
+	b := netip.MustParsePrefix(DefaultSubnet6).Addr().As16()
+	four := a.As4()
+	copy(b[12:], four[:])
+	return netip.AddrFrom16(b).String()
+}
+
 // DefaultDomain is the suffix added to device names in /etc/hosts.
 const DefaultDomain = "wgh"
 
@@ -189,9 +208,12 @@ type UpdateRequest struct {
 
 // Node is one device as the rest of the mesh sees it.
 type Node struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Address   string `json:"address"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Address string `json:"address"`
+	// Address6 is the device's IPv6 address inside the mesh, Addr6 of
+	// Address. A coordinator from before IPv6 sends none.
+	Address6  string `json:"address6,omitempty"`
 	PublicKey string `json:"public_key"`
 	// Endpoints are candidate UDP addresses to try, best first: what the
 	// relay saw, then the source of its last heartbeat, then its LAN.
@@ -221,6 +243,7 @@ type Node struct {
 type Relay struct {
 	Name      string `json:"name"`
 	Address   string `json:"address"`
+	Address6  string `json:"address6,omitempty"`
 	PublicKey string `json:"public_key"`
 	Endpoint  string `json:"endpoint"`
 	Exit      bool   `json:"exit,omitempty"`
@@ -230,6 +253,9 @@ type Relay struct {
 type NetMap struct {
 	Version uint64 `json:"version"`
 	Subnet  string `json:"subnet"`
+	// Subnet6 is the mesh IPv6 range, DefaultSubnet6. A coordinator from
+	// before IPv6 sends none, and the device then works over IPv4 only.
+	Subnet6 string `json:"subnet6,omitempty"`
 	Domain  string `json:"domain"`
 	Self    Node   `json:"self"`
 	Relay   *Relay `json:"relay,omitempty"`
@@ -246,8 +272,9 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// ValidRoutes checks a list of advertised subnet routes.
+// ValidRoutes checks a list of advertised subnet routes, IPv4 or IPv6.
 func ValidRoutes(routes []string) error {
+	mesh6 := netip.MustParsePrefix(DefaultSubnet6)
 	for _, r := range routes {
 		p, err := netip.ParsePrefix(r)
 		if err != nil {
@@ -258,6 +285,12 @@ func ValidRoutes(routes []string) error {
 		}
 		if p.Bits() == 0 {
 			return fmt.Errorf("route %q: use --advertise-exit to offer a default route", r)
+		}
+		if p.Addr().Is4In6() {
+			return fmt.Errorf("route %q: write an IPv4 route as IPv4", r)
+		}
+		if p.Overlaps(mesh6) {
+			return fmt.Errorf("route %q overlaps the mesh's own IPv6 range %s", r, DefaultSubnet6)
 		}
 	}
 	return nil

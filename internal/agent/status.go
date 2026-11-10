@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/overspend1/wgh/internal/mesh"
+	"github.com/overspend1/wgh/internal/wgctl"
 )
 
 // Path names shown in status.
@@ -29,6 +30,7 @@ const (
 type PeerStatus struct {
 	Name          string    `json:"name"`
 	Address       string    `json:"address"`
+	Address6      string    `json:"address6,omitempty"`
 	OS            string    `json:"os,omitempty"`
 	Online        bool      `json:"online"`
 	Path          string    `json:"path"`
@@ -45,9 +47,13 @@ type PeerStatus struct {
 
 // Status is the whole picture for 'wgh status' and the TUI.
 type Status struct {
-	Name          string       `json:"name"`
-	Address       string       `json:"address"`
+	Name    string `json:"name"`
+	Address string `json:"address"`
+	// Address6 is this device's IPv6 address inside the mesh; empty with a
+	// coordinator from before IPv6, or on a host with IPv6 turned off.
+	Address6      string       `json:"address6,omitempty"`
 	Subnet        string       `json:"subnet"`
+	Subnet6       string       `json:"subnet6,omitempty"`
 	Interface     string       `json:"interface"`
 	ListenPort    int          `json:"listen_port"`
 	URL           string       `json:"url"`
@@ -81,8 +87,11 @@ func (a *Agent) Status() Status {
 		return s
 	}
 	s.PendingRoutes, s.PendingExit = a.nm.Self.PendingRoutes, a.nm.Self.PendingExit
+	if a.upAddr6.IsValid() && wgctl.IPv6Off(a.o.Backend, a.st.Interface) == nil {
+		s.Address6, s.Subnet6 = a.upAddr6.Addr().String(), a.nm.Subnet6
+	}
 	if r := a.nm.Relay; r != nil {
-		ps := PeerStatus{Name: r.Name, Address: r.Address, Online: a.connected, Path: PathRelay,
+		ps := PeerStatus{Name: r.Name, Address: r.Address, Address6: r.Address6, Online: a.connected, Path: PathRelay,
 			Endpoint: r.Endpoint, Exit: r.Exit, Relay: true}
 		if st, ok := a.relayStatLocked(r.PublicKey); ok {
 			ps.LastHandshake, ps.RxBytes, ps.TxBytes = st.LastHandshake, st.RxBytes, st.TxBytes
@@ -94,7 +103,7 @@ func (a *Agent) Status() Status {
 		s.Peers = append(s.Peers, ps)
 	}
 	for _, n := range a.nm.Peers {
-		ps := PeerStatus{Name: n.Name, Address: n.Address, OS: n.OS, Online: n.Online, LastSeen: n.LastSeen,
+		ps := PeerStatus{Name: n.Name, Address: n.Address, Address6: n.Address6, OS: n.OS, Online: n.Online, LastSeen: n.LastSeen,
 			Routes: n.Routes, Exit: n.Exit, Static: n.Static}
 		switch p := a.paths[n.PublicKey]; {
 		case n.Static:

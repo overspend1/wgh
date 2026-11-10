@@ -450,15 +450,15 @@ func (s *Server) StaticConfig(name string) (string, error) {
 	if d == nil || !d.Static {
 		return "", fmt.Errorf("no phone or plain WireGuard device called %q", name)
 	}
-	allowed := []string{s.st.Subnet}
+	allowed := []string{s.st.Subnet, mesh.DefaultSubnet6}
 	for _, o := range s.st.Devices {
 		allowed = append(allowed, o.ApprovedRoutes...)
 	}
 	if d.StaticExit {
-		allowed = []string{"0.0.0.0/0"}
+		allowed = []string{"0.0.0.0/0", "::/0"}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "[Interface]\n# Name = %s\nAddress = %s/32\nPrivateKey = %s\n", d.Name, d.Address, d.StaticPrivate)
+	fmt.Fprintf(&b, "[Interface]\n# Name = %s\nAddress = %s/32, %s/128\nPrivateKey = %s\n", d.Name, d.Address, mesh.Addr6(d.Address), d.StaticPrivate)
 	fmt.Fprintf(&b, "\n[Peer]\n# %s (wgh relay)\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = %s\nPersistentKeepalive = 25\n",
 		s.o.Name, s.st.Relay.PublicKey, render.Endpoint(s.o.Endpoint, s.o.Port), strings.Join(dedupe(allowed), ", "))
 	return b.String(), nil
@@ -477,7 +477,7 @@ func dedupe(in []string) []string {
 }
 
 func (s *Server) nodeLocked(d *device, viewer *device) mesh.Node {
-	n := mesh.Node{ID: d.ID, Name: d.Name, Address: d.Address, PublicKey: d.PublicKey,
+	n := mesh.Node{ID: d.ID, Name: d.Name, Address: d.Address, Address6: mesh.Addr6(d.Address), PublicKey: d.PublicKey,
 		Routes: append([]string(nil), d.ApprovedRoutes...), Exit: d.ExitApproved, Online: d.Online,
 		LastSeen: d.LastSeen, Static: d.Static, OS: d.OS, Version: d.Version, RxBytes: d.Rx, TxBytes: d.Tx}
 	for _, r := range d.Routes {
@@ -510,7 +510,7 @@ func (s *Server) relayLocked() *mesh.Relay {
 	if s.o.NoRelay {
 		return nil
 	}
-	return &mesh.Relay{Name: s.o.Name, Address: s.st.Relay.Address, PublicKey: s.st.Relay.PublicKey,
+	return &mesh.Relay{Name: s.o.Name, Address: s.st.Relay.Address, Address6: mesh.Addr6(s.st.Relay.Address), PublicKey: s.st.Relay.PublicKey,
 		Endpoint: render.Endpoint(s.o.Endpoint, s.o.Port), Exit: s.o.Exit}
 }
 
@@ -522,7 +522,7 @@ func (s *Server) NetMap(apiKey string) (mesh.NetMap, <-chan struct{}, error) {
 	if d == nil {
 		return mesh.NetMap{}, nil, errUnauthorized("this device is not in the mesh (it was removed?)")
 	}
-	nm := mesh.NetMap{Version: s.st.NetVersion, Subnet: s.st.Subnet, Domain: s.st.Domain,
+	nm := mesh.NetMap{Version: s.st.NetVersion, Subnet: s.st.Subnet, Subnet6: mesh.DefaultSubnet6, Domain: s.st.Domain,
 		Self: s.nodeLocked(d, d), Relay: s.relayLocked()}
 	for _, o := range s.st.Devices {
 		if o == d {
@@ -540,6 +540,7 @@ func (s *Server) NetMap(apiKey string) (mesh.NetMap, <-chan struct{}, error) {
 type Status struct {
 	URL     string      `json:"url"`
 	Subnet  string      `json:"subnet"`
+	Subnet6 string      `json:"subnet6,omitempty"`
 	Relay   *mesh.Relay `json:"relay,omitempty"`
 	Devices []mesh.Node `json:"devices"`
 	Tokens  int         `json:"tokens"`
@@ -551,7 +552,7 @@ func (s *Server) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.o.Now()
-	st := Status{URL: s.o.URL, Subnet: s.st.Subnet, Relay: s.relayLocked(), Version: s.st.NetVersion}
+	st := Status{URL: s.o.URL, Subnet: s.st.Subnet, Subnet6: mesh.DefaultSubnet6, Relay: s.relayLocked(), Version: s.st.NetVersion}
 	for _, t := range s.st.Tokens {
 		if now.Before(t.Expires) {
 			st.Tokens++
@@ -610,9 +611,7 @@ func (s *Server) Sweep() {
 func (s *Server) relayPeersLocked() []wgctl.Peer {
 	var peers []wgctl.Peer
 	for _, d := range s.st.Devices {
-		allowed := []string{d.Address + "/32"}
-		allowed = append(allowed, d.ApprovedRoutes...)
-		peers = append(peers, wgctl.Peer{PublicKey: d.PublicKey, AllowedIPs: allowed})
+		peers = append(peers, wgctl.Peer{PublicKey: d.PublicKey, AllowedIPs: prefixes(d)})
 	}
 	return peers
 }
@@ -620,7 +619,38 @@ func (s *Server) relayPeersLocked() []wgctl.Peer {
 func (s *Server) relayInterface() wgctl.Interface {
 	bits := s.subnet.Bits()
 	return wgctl.Interface{Name: s.o.Interface, ListenPort: s.o.Port, PrivateKey: s.st.Relay.PrivateKey,
-		Address: netip.PrefixFrom(netip.MustParseAddr(s.st.Relay.Address), bits)}
+		Address: netip.PrefixFrom(netip.MustParseAddr(s.st.Relay.Address), bits), Address6: relayAddr6(s.st.Relay.Address)}
+}
+
+// relayAddr6 is the relay interface's IPv6 address, derived like every
+// device's from its IPv4 one.
+func relayAddr6(v4 string) netip.Prefix {
+	a, err := netip.ParseAddr(mesh.Addr6(v4))
+	if err != nil {
+		return netip.Prefix{}
+	}
+	return netip.PrefixFrom(a, netip.MustParsePrefix(mesh.DefaultSubnet6).Bits())
+}
+
+// startRelay6 logs, once at start, when the relay interface got no IPv6,
+// and with --exit turns on IPv6 forwarding and NAT, so devices that use the
+// relay as their exit node reach the IPv6 internet and relayed IPv6 between
+// devices is carried. Without --exit IPv6 forwarding stays off, because it
+// makes Linux ignore router advertisements, which a server may depend on
+// for its own IPv6: the relay then carries IPv4 between devices, and is
+// itself reachable over IPv6. A failure never stops the relay.
+func (s *Server) startRelay6() {
+	if err := wgctl.IPv6Off(s.o.Backend, s.o.Interface); err != nil {
+		s.o.Logf("relay: IPv6 inside the mesh is off on this host: %v; the relay works over IPv4", err)
+		return
+	}
+	f6, ok := s.o.Backend.(wgctl.Forwarder6)
+	if !ok || !s.o.Exit {
+		return
+	}
+	if err := f6.SetForward6(s.o.Interface, mesh.DefaultSubnet6, true); err != nil {
+		s.o.Logf("relay: IPv6 forwarding for the exit node: %v; it carries IPv4 only", err)
+	}
 }
 
 // syncRelay applies the relay's access filter and peer list when they have
@@ -665,6 +695,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if err := s.o.Backend.SetForward(s.o.Interface, s.st.Subnet, true); err != nil {
 			return fmt.Errorf("enable forwarding for the relay: %w", err)
 		}
+		s.startRelay6()
 		if err := s.syncRelay(); err != nil {
 			return fmt.Errorf("configure relay: %w", err)
 		}

@@ -65,6 +65,13 @@ type Darwin struct {
 	gw     []string // "-gateway", "192.168.1.1" or "-interface", "en0"
 	want   []netip.Addr
 	added  map[netip.Addr][]string // bypass host -> gateway it was added via
+
+	// IPv6 inside the mesh.
+	addr6   map[string]netip.Prefix // logical name -> IPv6 address, when set
+	v6off   map[string]error        // why a name asked for IPv6 has none
+	subnet6 map[string]string       // logical name -> IPv6 mesh route added
+	exit6   bool                    // the IPv6 halves are routed into the tunnel
+	gw6     []string                // the IPv6 default gateway, nil for none
 }
 
 // NewDarwin returns a macOS backend that runs real commands.
@@ -137,16 +144,16 @@ func (d *Darwin) Up(ifc Interface) error {
 	}
 	d.mu.Lock()
 	mapped := d.real[ifc.Name]
-	routed := d.subnet[ifc.Name]
+	routed, routed6 := d.subnet[ifc.Name], d.subnet6[ifc.Name]
 	d.mu.Unlock()
 
 	real, earlier := "", false
 	if mapped != "" && d.running(mapped) {
 		real = mapped
 	} else if r, err := d.readName(ifc.Name); err == nil && d.running(r) {
-		real, earlier, routed = r, true, ""
+		real, earlier, routed, routed6 = r, true, "", ""
 	} else {
-		routed = ""
+		routed, routed6 = "", ""
 		if err := d.run("mkdir", "-p", wgRunDir); err != nil {
 			return err
 		}
@@ -166,6 +173,12 @@ func (d *Darwin) Up(ifc Interface) error {
 	if d.real == nil {
 		d.real, d.addr, d.subnet = map[string]string{}, map[string]netip.Prefix{}, map[string]string{}
 	}
+	if d.addr6 == nil {
+		d.addr6, d.v6off, d.subnet6 = map[string]netip.Prefix{}, map[string]error{}, map[string]string{}
+	}
+	if routed6 == "" {
+		delete(d.subnet6, ifc.Name) // a new utun device has none of the old routes
+	}
 	d.real[ifc.Name], d.addr[ifc.Name] = real, ifc.Address
 	d.mu.Unlock()
 
@@ -183,20 +196,70 @@ func (d *Darwin) Up(ifc Interface) error {
 		}
 	}
 	subnet := ifc.Address.Masked().String()
-	if routed == subnet {
-		return nil
+	if routed != subnet {
+		if earlier {
+			// An earlier wgh may have left this route on the reused device.
+			_ = d.run("route", "-q", "-n", "delete", "-inet", subnet, "-interface", real)
+		}
+		if err := d.run("route", "-q", "-n", "add", "-inet", subnet, "-interface", real); err != nil {
+			return err
+		}
+		d.mu.Lock()
+		d.subnet[ifc.Name] = subnet
+		d.mu.Unlock()
 	}
-	if earlier {
-		// An earlier wgh may have left this route on the reused device.
-		_ = d.run("route", "-q", "-n", "delete", "-inet", subnet, "-interface", real)
+	d.up6(ifc, real, routed6, earlier) // never fails Up: without IPv6 it is IPv4 only
+	return nil
+}
+
+// up6 gives the utun device its IPv6 address, as a /128 like wg-quick does,
+// and routes the mesh's IPv6 range through it. A failure is recorded for
+// IPv6Off and the interface stays IPv4 only.
+func (d *Darwin) up6(ifc Interface, real, routed6 string, earlier bool) {
+	a := ifc.Address6
+	off := func(err error) {
+		d.mu.Lock()
+		delete(d.addr6, ifc.Name)
+		d.v6off[ifc.Name] = err
+		d.mu.Unlock()
 	}
-	if err := d.run("route", "-q", "-n", "add", "-inet", subnet, "-interface", real); err != nil {
-		return err
+	if !a.IsValid() {
+		d.mu.Lock()
+		delete(d.addr6, ifc.Name)
+		delete(d.v6off, ifc.Name)
+		d.mu.Unlock()
+		return
+	}
+	if !a.Addr().Is6() || a.Addr().Is4In6() || a.Addr().Zone() != "" {
+		off(fmt.Errorf("%s is not an IPv6 interface address", a))
+		return
+	}
+	if err := d.run("ifconfig", real, "inet6", a.Addr().String(), "prefixlen", "128", "alias"); err != nil {
+		off(fmt.Errorf("IPv6 looks disabled on this Mac: %w", err))
+		return
+	}
+	subnet := a.Masked().String()
+	if routed6 != subnet {
+		if earlier {
+			_ = d.run("route", "-q", "-n", "delete", "-inet6", subnet, "-interface", real)
+		}
+		if err := d.run("route", "-q", "-n", "add", "-inet6", subnet, "-interface", real); err != nil {
+			off(fmt.Errorf("route the mesh's IPv6 range: %w", err))
+			return
+		}
 	}
 	d.mu.Lock()
-	d.subnet[ifc.Name] = subnet
+	d.subnet6[ifc.Name] = subnet
+	d.addr6[ifc.Name] = a
+	delete(d.v6off, ifc.Name)
 	d.mu.Unlock()
-	return nil
+}
+
+// IPv6Off implements IPv6Reporter.
+func (d *Darwin) IPv6Off(name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.v6off[name]
 }
 
 // SetPeers implements Backend. The config, which holds the private key, is
@@ -299,6 +362,12 @@ func (d *Darwin) SetExit(name string, on bool) error {
 		return err
 	}
 	d.gw, d.added = gw, map[netip.Addr][]string{}
+	d.gw6 = nil
+	if d.addr6[name].IsValid() {
+		// With no IPv6 default route there is no IPv6 internet to send
+		// through the exit node, so its IPv6 halves are left out.
+		d.gw6 = d.defaultGateway6(real)
+	}
 	_ = d.syncBypass(d.want) // a host that fails is retried by SetBypass
 	for _, half := range exitHalves {
 		if err := d.run("route", "-q", "-n", "add", "-inet", half, "-interface", real); err != nil {
@@ -306,16 +375,52 @@ func (d *Darwin) SetExit(name string, on bool) error {
 			return err
 		}
 	}
+	if d.gw6 != nil {
+		d.exit6 = true
+		for _, half := range exitHalves6 {
+			if err := d.run("route", "-q", "-n", "add", "-inet6", half, "-interface", real); err != nil {
+				d.exitOff(real)
+				return fmt.Errorf("IPv6 exit routes, so the exit node stays off: %w", err)
+			}
+		}
+	}
 	d.exit = true
 	return nil
 }
+
+// exitHalves6 are exitHalves for IPv6.
+var exitHalves6 = []string{"::/1", "8000::/1"}
 
 func (d *Darwin) exitOff(real string) {
 	for _, half := range exitHalves {
 		_ = d.run("route", "-q", "-n", "delete", "-inet", half, "-interface", real)
 	}
+	if d.exit6 {
+		for _, half := range exitHalves6 {
+			_ = d.run("route", "-q", "-n", "delete", "-inet6", half, "-interface", real)
+		}
+	}
 	_ = d.syncBypass(nil)
-	d.exit, d.gw, d.added = false, nil, nil
+	d.exit, d.exit6, d.gw, d.gw6, d.added = false, false, nil, nil, nil
+}
+
+// defaultGateway6 reads where the IPv6 default route goes, as route
+// arguments, or nil when there is none outside the tunnel.
+func (d *Darwin) defaultGateway6(real string) []string {
+	out, err := d.Run(nil, "route", "-n", "get", "-inet6", "default")
+	if err != nil {
+		return nil
+	}
+	gw, ifc := ParseRouteGet(out)
+	switch {
+	case ifc == real:
+		return nil
+	case gw.Is6() && !gw.Is4In6():
+		return []string{"-gateway", gw.String()} // keeps a link-local gateway's %zone
+	case ifc != "":
+		return []string{"-interface", ifc}
+	}
+	return nil
 }
 
 // defaultGateway reads where the default route goes, as route arguments.
@@ -356,12 +461,13 @@ func ParseRouteGet(out []byte) (gateway netip.Addr, iface string) {
 	return gateway, iface
 }
 
-// SetBypass implements Bypasser. Only IPv4 hosts that are neither on a
-// local network nor in the mesh get routes, and only while the exit node
-// is on; the list is kept for when it turns on.
+// SetBypass implements Bypasser. Only hosts that are neither on a local
+// network nor in the mesh get routes, and only while the exit node is on;
+// the list is kept for when it turns on. IPv6 hosts get routes only while
+// the exit node takes IPv6 too, via the IPv6 default gateway.
 func (d *Darwin) SetBypass(name string, hosts []netip.Addr) error {
 	d.mu.Lock()
-	mesh := d.addr[name]
+	mesh, mesh6 := d.addr[name], d.addr6[name]
 	d.mu.Unlock()
 	var local []netip.Prefix
 	if d.Local != nil {
@@ -370,8 +476,9 @@ func (d *Darwin) SetBypass(name string, hosts []netip.Addr) error {
 	seen := map[netip.Addr]bool{}
 	var want []netip.Addr
 	for _, h := range hosts {
-		h = h.Unmap()
-		if !h.Is4() || !h.IsGlobalUnicast() || seen[h] || (mesh.IsValid() && mesh.Masked().Contains(h)) {
+		h = h.Unmap().WithZone("")
+		if !h.IsGlobalUnicast() || seen[h] || (mesh.IsValid() && mesh.Masked().Contains(h)) ||
+			(mesh6.IsValid() && mesh6.Masked().Contains(h)) {
 			continue
 		}
 		onLink := false
@@ -410,26 +517,27 @@ func (d *Darwin) syncBypass(want []netip.Addr) error {
 	sort.Slice(old, func(i, j int) bool { return old[i].Less(old[j]) })
 	for _, h := range old {
 		if !keep[h] {
-			args := append([]string{"route", "-q", "-n", "delete", "-inet", "-host", h.String()}, d.added[h]...)
+			args := append([]string{"route", "-q", "-n", "delete", family(h.String()), "-host", h.String()}, d.added[h]...)
 			if err := d.run(args...); err != nil {
 				errs = append(errs, err)
 			}
 			delete(d.added, h)
 		}
 	}
-	if d.gw == nil {
-		return errors.Join(errs...)
-	}
 	for _, h := range want {
-		if _, ok := d.added[h]; ok {
+		gw := d.gw
+		if h.Is6() {
+			gw = d.gw6
+		}
+		if _, ok := d.added[h]; ok || gw == nil {
 			continue
 		}
-		args := append([]string{"route", "-q", "-n", "add", "-inet", "-host", h.String()}, d.gw...)
+		args := append([]string{"route", "-q", "-n", "add", family(h.String()), "-host", h.String()}, gw...)
 		if err := d.run(args...); err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		d.added[h] = d.gw
+		d.added[h] = gw
 	}
 	return errors.Join(errs...)
 }
@@ -463,9 +571,15 @@ func (d *Darwin) Down(name string) error {
 	if s := d.subnet[name]; s != "" {
 		_ = d.run("route", "-q", "-n", "delete", "-inet", s, "-interface", real)
 	}
+	if s := d.subnet6[name]; s != "" {
+		_ = d.run("route", "-q", "-n", "delete", "-inet6", s, "-interface", real)
+	}
 	delete(d.real, name)
 	delete(d.addr, name)
 	delete(d.subnet, name)
+	delete(d.addr6, name)
+	delete(d.v6off, name)
+	delete(d.subnet6, name)
 	d.mu.Unlock()
 	if err := d.run("rm", "-f", sockFile(real)); err != nil {
 		errs = append(errs, err)
