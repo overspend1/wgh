@@ -15,8 +15,11 @@ touching the network and never needing root. See [Simple server](#simple-server)
 
 - Single static Go binary. No other daemons, no database.
 - Each device makes its own key and never sends the private half anywhere.
-- Devices find each other by name: `ssh pve1` or `ssh pve1.wgh`.
-- Exit node, shared LAN routes, key rotation, removal, phones by QR code.
+- Devices find each other by name, `ssh pve1` or `ssh pve1.wgh`, through a
+  small built-in DNS server and the hosts file.
+- Exit node, shared LAN routes, access rules, key rotation, removal, phones by
+  QR code. Linux and macOS devices run the agent; everything else joins like a
+  phone.
 - `wgh update` replaces itself with the latest release, checksum-verified.
 
 ## Install
@@ -48,11 +51,16 @@ go install github.com/overspend1/wgh/cmd/wgh@latest
 - **Root.** `wgh serve` and `wgh up` create a WireGuard interface, set routes
   and, for an exit node, firewall rules. Both refuse to run without root and
   say so. Nothing else in wgh needs root.
-- **Linux** on the coordinator and on every device that runs `wgh up`, with
-  `wireguard-tools` (the `wg` command) and `iproute2` (`ip`). The kernel
-  WireGuard module is used when it is there (any kernel from 5.6, and most
-  older distribution kernels); otherwise wgh starts `wireguard-go` if it is
-  installed. An exit node or relay also needs `iptables`.
+- **Linux** on the coordinator, with `wireguard-tools` (the `wg` command),
+  `iproute2` (`ip`) and `iptables`.
+- **Linux or macOS** on every device that runs `wgh up`.
+  - Linux: `wireguard-tools` and `iproute2`. The kernel WireGuard module is
+    used when it is there (any kernel from 5.6, and most older distribution
+    kernels); otherwise wgh starts `wireguard-go` if it is installed. An exit
+    node, shared routes or access rules also need `iptables`.
+  - macOS: `brew install wireguard-tools`, which brings `wg` and
+    `wireguard-go`. A Mac can use an exit node and other devices' routes, but
+    cannot share its own LAN or be an exit node; `wgh status` says so.
 - **Phones, tablets and other OSes** join as plain WireGuard peers through the
   relay, using the official WireGuard app (see [Phones](#phones)).
 - One machine every device can reach for the coordinator: a small VPS, or a
@@ -65,6 +73,7 @@ Ports:
 | coordinator | TCP 8443 | device API (HTTPS) |
 | coordinator | UDP 51820 | relay |
 | each device | UDP 41820 | direct connections (forwarding it helps but is optional) |
+| each device | UDP and TCP 53 | names, on the device's mesh address only |
 
 ### Quick start
 
@@ -128,6 +137,7 @@ sudo systemctl enable --now wgh-serve    # or wgh-up
 | `--advertise-routes 192.168.1.0/24` | share these LAN ranges (needs approval on the coordinator) |
 | `--advertise-exit=true` | offer this device as an exit node (needs approval) |
 | `--accept-routes=false` | ignore routes other devices share |
+| `--dns=false` | no built-in DNS server; names come from the hosts file only |
 | `--hosts ""` | leave `/etc/hosts` alone |
 | `--dry-run` | print what would be done, change nothing |
 
@@ -141,19 +151,25 @@ sudo systemctl enable --now wgh-serve    # or wgh-up
   with no certificate authority involved. Behind a reverse proxy that already
   does TLS, run `wgh serve --plain-http --url https://your.proxy` and devices
   check the proxy's normal certificate instead.
-- **Direct first.** Every device tries every other one directly: the public
-  address the relay saw it come from (that is the STUN-style part), its listen
-  port on that address, and its LAN addresses, LAN first when two devices sit
-  behind the same router. Whatever answers is used.
+- **Direct first.** Every device tries every other one directly: its global
+  IPv6 address first when both have one, then the public address the relay saw
+  it come from (that is the STUN-style part), its listen port on that address,
+  and its LAN addresses, LAN first when two devices sit behind the same router
+  or the same IPv6 network. Whatever answers is used.
 - **Relay when it has to.** Until a direct path answers, traffic goes through
   the relay on the coordinator. When a direct path appears, traffic moves onto
   it within seconds; if it breaks, it falls back.
-- **Names.** wgh keeps a marked block in `/etc/hosts` with every device as
-  `name` and `name.wgh`, and removes it on `wgh down`.
+- **Names.** Each device answers `*.wgh` on its own mesh address with a tiny
+  DNS server and points the system at it for that domain only: on Linux
+  through `systemd-resolved` (`resolvectl`), on macOS with a file in
+  `/etc/resolver/`. Other lookups are untouched. wgh also keeps a marked block
+  in `/etc/hosts` with every device as `name` and `name.wgh`, which covers
+  machines without `systemd-resolved`. Both go away on `wgh down`.
 - **Exit node.** Internet traffic goes through the chosen device with policy
   routing (the same trick `wg-quick` uses), and the connection to the
-  coordinator stays outside the tunnel. A device used as exit node needs a
-  direct path; the relay itself can be the exit node with `wgh serve --exit`.
+  coordinator stays outside the tunnel. When there is no direct path to the
+  exit node yet, the relay carries the traffic to it until one answers. The
+  relay itself can also be the exit node, with `wgh serve --exit`.
 - **Shared routes.** A device can share its LAN (`--advertise-routes`). Once the
   coordinator approves, every other device can reach that LAN through it.
 - **Removal and rotation.** Removing a device drops it from everyone at once.
@@ -214,7 +230,8 @@ with a warning.
   because the relay is a WireGuard peer of both sides. Direct traffic is end to
   end. If you do not trust the machine that runs the relay, that matters (unlike
   Tailscale's relays, which only pass encrypted packets along).
-- Device state lives in `/var/lib/wgh/agent.json` (mode `0600`, root's), and the
+- Device state lives in `/var/lib/wgh/agent.json` (on macOS
+  `/Library/Application Support/wgh/agent.json`; mode `0600`, root's), and the
   coordinator's in `/var/lib/wgh/coordinator/`. Back up the coordinator
   directory; losing it means every device has to join again.
 
@@ -224,16 +241,17 @@ The core works; these are not there yet:
 
 - Devices behind two strict (symmetric) NATs never get a direct path and stay
   on the relay. No port prediction or birthday tricks yet.
-- IPv4 only, inside the mesh and for endpoints.
-- `wgh up` runs on Linux only. macOS and Windows join as phones for now.
-- Names come from the hosts file, not a DNS server, so other machines on your
-  LAN cannot look them up.
-- Access rules work per device, not per port, and a device whose backend has
-  no firewall (macOS) does not filter by itself; the relay still does.
-- A device that is itself only reachable through the relay cannot be an exit
-  node yet.
-- Not tested on a real kernel by the automated tests, which run against a fake
-  WireGuard backend. Tested by hand with `--dry-run`.
+- `wgh up` runs on Linux and macOS. Windows joins as a phone for now.
+- A Mac does not filter incoming traffic by itself, so access rules on a Mac
+  are enforced by the other side and by the relay only. Its exit-node routing
+  does not follow a change of Wi-Fi network until `wgh up` restarts.
+- Access rules work per device, not per port.
+- The relay carries traffic to one exit node at a time for devices without a
+  direct path to it; if several are asked for, the most used one wins.
+- Names are only answered on the mesh, so other machines on your LAN cannot
+  look them up.
+- The automated tests run against a fake WireGuard backend, not a real kernel
+  or a real Mac. Tested by hand with `--dry-run`.
 
 ## The interface
 
