@@ -51,6 +51,7 @@ type Fake struct {
 	routes  []string
 	exit    bool
 	forward bool
+	bypass  []netip.Addr
 	hs      map[string]time.Time
 }
 
@@ -257,10 +258,18 @@ func (f *Fake) SetForward(name, subnet string, on bool) error {
 	return nil
 }
 
+// SetBypass implements Bypasser by recording the hosts.
+func (f *Fake) SetBypass(_ string, hosts []netip.Addr) error {
+	f.mu.Lock()
+	f.bypass = append([]netip.Addr(nil), hosts...)
+	f.mu.Unlock()
+	return nil
+}
+
 // Down implements Backend.
 func (f *Fake) Down(name string) error {
 	f.mu.Lock()
-	f.ifc, f.peers, f.routes, f.exit, f.forward = nil, nil, nil, false, false
+	f.ifc, f.peers, f.routes, f.exit, f.forward, f.bypass = nil, nil, nil, false, false, nil
 	f.mu.Unlock()
 	f.logf("[dry-run] remove %s", name)
 	return nil
@@ -274,6 +283,7 @@ type Snapshot struct {
 	Routes  []string
 	Exit    bool
 	Forward bool
+	Bypass  []netip.Addr // last SetBypass
 }
 
 // Snapshot returns the current configuration.
@@ -281,7 +291,8 @@ func (f *Fake) Snapshot() Snapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s := Snapshot{Up: f.ifc != nil, Peers: append([]Peer(nil), f.peers...),
-		Routes: append([]string(nil), f.routes...), Exit: f.exit, Forward: f.forward}
+		Routes: append([]string(nil), f.routes...), Exit: f.exit, Forward: f.forward,
+		Bypass: append([]netip.Addr(nil), f.bypass...)}
 	if f.ifc != nil {
 		s.Address = f.ifc.Address
 	}

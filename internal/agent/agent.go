@@ -126,6 +126,7 @@ type Options struct {
 	Tick       time.Duration
 	LocalAddrs func() []netip.Addr
 	NoSocket   bool
+	LookupIP   func(ctx context.Context, host string) ([]netip.Addr, error)
 
 	// DNS test hooks.
 	DNSAddr      netip.AddrPort          // listen here instead of <mesh address>:53
@@ -161,8 +162,10 @@ type Agent struct {
 	stop      context.CancelFunc
 	dnsOn     bool
 
-	dnsMu sync.Mutex
-	dns   dnsState
+	dnsMu     sync.Mutex
+	dns       dnsState
+	noForward error    // the backend can't forward: routes and exit are not offered
+	res       resolver // bypass hosts, for backends that need them
 }
 
 // New loads the device state and prepares an agent.
@@ -192,7 +195,8 @@ func New(o Options) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &Agent{o: o, st: *st, paths: map[string]*path{}, wake: make(chan struct{}, 1)}
+	a := &Agent{o: o, st: *st, paths: map[string]*path{}, wake: make(chan struct{}, 1),
+		noForward: wgctl.CanForward(o.Backend), res: resolver{lookup: o.LookupIP}}
 	a.client = NewClient(st.URL, st.Pin, st.APIKey)
 	if o.HTTP != nil {
 		o.HTTP(a.client)
@@ -233,6 +237,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.upDone, a.upKey = true, a.st.PrivateKey
 	a.mu.Unlock()
 	defer a.teardown()
+	a.mu.Lock()
+	if note := a.forwardNoteLocked(); note != "" {
+		a.o.Logf("%s", note)
+	}
+	a.mu.Unlock()
 	if err := a.reconcile(); err != nil {
 		a.o.Logf("configure: %v", err)
 	}
@@ -354,6 +363,9 @@ func (a *Agent) heartbeat(ctx context.Context, newPub string) error {
 	a.mu.Lock()
 	req := mesh.UpdateRequest{ListenPort: a.st.ListenPort, Routes: a.st.Routes, Exit: a.st.Exit,
 		PublicKey: newPub, OS: runtime.GOOS, Version: a.o.Version}
+	if a.noForward != nil {
+		req.Routes, req.Exit = nil, false // nothing to offer: this system can't forward
+	}
 	for _, p := range a.paths {
 		req.RxBytes += p.stat.RxBytes
 		req.TxBytes += p.stat.TxBytes
@@ -469,7 +481,13 @@ func (a *Agent) reconcile() error {
 		}
 	}
 	errs = append(errs, a.o.Backend.SetRoutes(ifc.Name, routes))
+	if a.noForward != nil {
+		forward = false
+	}
 	errs = append(errs, a.o.Backend.SetForward(ifc.Name, nm.Subnet, forward))
+	if exitOn {
+		errs = append(errs, a.setBypass(ifc.Name, nm, peers))
+	}
 	if err := a.o.Backend.SetExit(ifc.Name, exitOn); err != nil {
 		errs = append(errs, err)
 		exitOn = false
