@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -49,19 +48,6 @@ type Linux struct {
 
 // NewLinux returns a Linux backend that runs real commands.
 func NewLinux() *Linux { return &Linux{Run: ExecRunner} }
-
-// Check reports whether this machine can run the Linux backend.
-func Check() error {
-	if os.Geteuid() != 0 {
-		return errors.New("setting up the WireGuard interface needs root: run 'sudo wgh up' (or use --dry-run to see what it would do)")
-	}
-	for _, tool := range []string{"ip", "wg"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			return fmt.Errorf("%s is not installed: install iproute2 and wireguard-tools", tool)
-		}
-	}
-	return nil
-}
 
 func (l *Linux) run(args ...string) error {
 	_, err := l.Run(nil, args[0], args[1:]...)

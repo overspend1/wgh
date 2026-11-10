@@ -56,6 +56,7 @@ type Status struct {
 	ExitNode      string       `json:"exit_node,omitempty"`
 	ExitActive    bool         `json:"exit_active"`
 	ExitNote      string       `json:"exit_note,omitempty"`
+	ForwardNote   string       `json:"forward_note,omitempty"`
 	Routes        []string     `json:"advertise_routes,omitempty"`
 	AdvertiseExit bool         `json:"advertise_exit,omitempty"`
 	PendingRoutes []string     `json:"pending_routes,omitempty"`
@@ -73,7 +74,8 @@ func (a *Agent) Status() Status {
 	s := Status{Name: a.st.Name, Address: a.st.Address, Subnet: a.st.Subnet, Interface: a.st.Interface,
 		ListenPort: a.st.ListenPort, URL: a.st.URL, Connected: a.connected, LastError: a.lastErr,
 		ExitNode: a.st.ExitNode, ExitActive: a.exitOn, ExitNote: a.exitNote, Routes: a.st.Routes,
-		AdvertiseExit: a.st.Exit, DryRun: a.o.DryRun, Version: a.o.Version, At: a.o.Now()}
+		AdvertiseExit: a.st.Exit, DryRun: a.o.DryRun, Version: a.o.Version, At: a.o.Now(),
+		ForwardNote: a.forwardNoteLocked()}
 	if a.nm == nil {
 		return s
 	}

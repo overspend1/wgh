@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -28,7 +29,7 @@ func defaultCoordDir() string {
 		return p
 	}
 	if os.Geteuid() == 0 {
-		return "/var/lib/wgh/coordinator"
+		return filepath.Join(agent.RootDir, "coordinator")
 	}
 	if dir, err := os.UserConfigDir(); err == nil {
 		return filepath.Join(dir, "wgh", "coordinator")
@@ -76,6 +77,9 @@ func cmdServe(args []string, stdout, stderr io.Writer) error {
 	case *dry:
 		backend = wgctl.NewFake(stdout, nil, "")
 	default:
+		if runtime.GOOS != "linux" {
+			return errors.New("serve: the WireGuard relay needs Linux; run with --no-relay for the control plane only, or --dry-run")
+		}
 		if err := wgctl.Check(); err != nil {
 			return fmt.Errorf("serve: %w (or run with --no-relay for the control plane only)", err)
 		}
@@ -168,7 +172,7 @@ func cmdUp(args []string, stdout, stderr io.Writer) error {
 		if err := wgctl.Check(); err != nil {
 			return err
 		}
-		backend = wgctl.NewLinux()
+		backend = wgctl.NewSystem()
 	}
 	if changed && !*dry {
 		if err := agent.Save(*statePath, st); err != nil {
@@ -263,6 +267,9 @@ func printStatus(w io.Writer, s agent.Status) {
 			state = "off: " + s.ExitNote
 		}
 		fmt.Fprintf(w, "exit node %s (%s)\n", s.ExitNode, state)
+	}
+	if s.ForwardNote != "" {
+		fmt.Fprintln(w, s.ForwardNote)
 	}
 	if len(s.PendingRoutes) > 0 || s.PendingExit {
 		fmt.Fprintln(w, "waiting for approval on the coordinator: wgh admin approve", s.Name)

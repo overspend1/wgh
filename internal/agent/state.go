@@ -41,14 +41,14 @@ type State struct {
 // ErrNotJoined means there is no agent state yet.
 var ErrNotJoined = errors.New("this device has not joined a mesh yet: run 'wgh join <token>'")
 
-// DefaultPath is $WGH_AGENT_STATE, else /var/lib/wgh/agent.json for root,
-// else ~/.config/wgh/agent.json.
+// DefaultPath is $WGH_AGENT_STATE, else RootDir/agent.json for root (on
+// Linux /var/lib/wgh/agent.json), else agent.json in the user's config dir.
 func DefaultPath() string {
 	if p := os.Getenv("WGH_AGENT_STATE"); p != "" {
 		return p
 	}
 	if os.Geteuid() == 0 {
-		return "/var/lib/wgh/agent.json"
+		return filepath.Join(RootDir, "agent.json")
 	}
 	if dir, err := os.UserConfigDir(); err == nil {
 		return filepath.Join(dir, "wgh", "agent.json")

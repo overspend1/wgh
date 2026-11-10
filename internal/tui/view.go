@@ -238,7 +238,7 @@ func (a *App) viewDevices() (string, string) {
 }
 
 func upCommand(statePath string) string {
-	if statePath == agent.DefaultPath() || statePath == "/var/lib/wgh/agent.json" {
+	if statePath == agent.DefaultPath() || statePath == agent.RootDir+"/agent.json" {
 		return "sudo wgh up"
 	}
 	return "sudo wgh up --state " + statePath

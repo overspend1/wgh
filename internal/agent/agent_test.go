@@ -81,6 +81,12 @@ type dev struct {
 
 func (r *rig) join(name, ip string, routes []string, exit bool) *dev {
 	r.t.Helper()
+	return r.joinWith(name, ip, routes, exit, nil)
+}
+
+// joinWith is join with the fake wrapped by wrap, when set.
+func (r *rig) joinWith(name, ip string, routes []string, exit bool, wrap func(*wgctl.Fake) wgctl.Backend) *dev {
+	r.t.Helper()
 	tok, err := r.srv.NewToken(time.Hour, false, false)
 	if err != nil {
 		r.t.Fatal(err)
@@ -94,9 +100,13 @@ func (r *rig) join(name, ip string, routes []string, exit bool) *dev {
 	os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0o644)
 	addr := netip.MustParseAddr(ip)
 	fake := wgctl.NewFake(nil, r.net, ip+":41820")
-	a, err := New(Options{StatePath: path, Backend: fake, HostsPath: hosts, Now: r.clk.Now,
+	var backend wgctl.Backend = fake
+	if wrap != nil {
+		backend = wrap(fake)
+	}
+	a, err := New(Options{StatePath: path, Backend: backend, HostsPath: hosts, Now: r.clk.Now,
 		PollWait: time.Second, Heartbeat: 30 * time.Millisecond, Tick: 20 * time.Millisecond,
-		LocalAddrs: func() []netip.Addr { return []netip.Addr{addr} }, NoSocket: true})
+		LocalAddrs: func() []netip.Addr { return []netip.Addr{addr} }, NoSocket: true, LookupIP: testLookup})
 	if err != nil {
 		r.t.Fatal(err)
 	}
