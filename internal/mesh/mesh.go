@@ -210,6 +210,9 @@ type Node struct {
 	PendingExit   bool     `json:"pending_exit,omitempty"`
 	RxBytes       int64    `json:"rx_bytes,omitempty"`
 	TxBytes       int64    `json:"tx_bytes,omitempty"`
+	// CanConnect: this peer may open connections to the device receiving
+	// the map. It is only enforced when NetMap.ACL is set.
+	CanConnect bool `json:"can_connect,omitempty"`
 }
 
 // Relay is the coordinator's own WireGuard peer: it relays traffic when two
@@ -231,6 +234,11 @@ type NetMap struct {
 	Self    Node   `json:"self"`
 	Relay   *Relay `json:"relay,omitempty"`
 	Peers   []Node `json:"peers"`
+	// ACL is set when the coordinator has an access policy (acl.json): the
+	// map then holds only the peers this device may reach or be reached by,
+	// and the device lets in new connections only from peers with
+	// CanConnect. Unset, every peer may connect and nothing is filtered.
+	ACL bool `json:"acl,omitempty"`
 }
 
 // ErrorResponse is the body of every non-2xx reply.

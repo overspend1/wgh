@@ -85,6 +85,7 @@ type Server struct {
 	subnet   netip.Prefix
 	changed  chan struct{}
 	relayCfg []wgctl.Peer
+	acl      aclState
 }
 
 // New loads or creates the coordinator state in o.Dir.
@@ -130,6 +131,9 @@ func New(o Options) (*Server, error) {
 	s.st = st
 	s.subnet, err = netip.ParsePrefix(st.Subnet)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.loadACL(); err != nil {
 		return nil, err
 	}
 	if !o.PlainHTTP {
@@ -521,10 +525,14 @@ func (s *Server) NetMap(apiKey string) (mesh.NetMap, <-chan struct{}, error) {
 	nm := mesh.NetMap{Version: s.st.NetVersion, Subnet: s.st.Subnet, Domain: s.st.Domain,
 		Self: s.nodeLocked(d, d), Relay: s.relayLocked()}
 	for _, o := range s.st.Devices {
-		if o != d {
-			nm.Peers = append(nm.Peers, s.nodeLocked(o, d))
+		if o == d {
+			continue
+		}
+		if n, ok := s.peerViewLocked(o, d); ok {
+			nm.Peers = append(nm.Peers, n)
 		}
 	}
+	nm.ACL = !s.policyLocked().IsAllowAll()
 	return nm, s.changed, nil
 }
 
@@ -558,6 +566,7 @@ func (s *Server) Status() Status {
 // Sweep refreshes online flags and the relay's view of each device. It runs
 // every few seconds and on its own changes nothing a device sends.
 func (s *Server) Sweep() {
+	s.checkACL()
 	var stats map[string]wgctl.PeerStat
 	if !s.o.NoRelay && s.o.Backend != nil {
 		if list, err := s.o.Backend.Stats(s.o.Interface); err == nil {
@@ -614,21 +623,24 @@ func (s *Server) relayInterface() wgctl.Interface {
 		Address: netip.PrefixFrom(netip.MustParseAddr(s.st.Relay.Address), bits)}
 }
 
-// syncRelay applies the relay peer list when it has changed.
+// syncRelay applies the relay's access filter and peer list when they have
+// changed. The filter goes first, so a new device's rules are in place
+// before it becomes a peer.
 func (s *Server) syncRelay() error {
 	if s.o.NoRelay || s.o.Backend == nil {
 		return nil
 	}
+	ferr := s.syncRelayFilter()
 	s.mu.Lock()
 	peers := s.relayPeersLocked()
 	ifc := s.relayInterface()
 	same := s.relayCfg != nil && wgctl.EqualPeers(peers, s.relayCfg)
 	s.mu.Unlock()
 	if same {
-		return nil
+		return ferr
 	}
 	if err := s.o.Backend.SetPeers(ifc, peers); err != nil {
-		return err
+		return errors.Join(ferr, err)
 	}
 	s.mu.Lock()
 	s.relayCfg = peers
@@ -636,7 +648,7 @@ func (s *Server) syncRelay() error {
 		s.relayCfg = []wgctl.Peer{}
 	}
 	s.mu.Unlock()
-	return nil
+	return ferr
 }
 
 // Run serves the API and the admin socket until ctx ends, then removes the
@@ -845,6 +857,9 @@ func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.Status())
+	})
+	mux.HandleFunc("GET /admin/acl", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.ACLStatus())
 	})
 	mux.HandleFunc("POST /admin/token", func(w http.ResponseWriter, r *http.Request) {
 		var req TokenRequest

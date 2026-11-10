@@ -468,6 +468,9 @@ func (a *Agent) reconcile() error {
 			errs = append(errs, err)
 		}
 	}
+	// The access filter goes before the peers, so a peer the policy just
+	// closed off never gets a moment with the old rules.
+	errs = append(errs, a.applyFilter(ifc.Name, nm))
 	if !same {
 		if err := a.o.Backend.SetPeers(ifc, peers); err != nil {
 			errs = append(errs, err)

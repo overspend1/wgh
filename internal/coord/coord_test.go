@@ -92,6 +92,10 @@ func TestServeOverTLSAndAdminSocket(t *testing.T) {
 	if len(status.Devices) != 1 || status.Devices[0].Name != "laptop" || status.Relay == nil {
 		t.Fatalf("status: %+v", status)
 	}
+	if acl, err := adm.ACL(); err != nil || acl.InUse || acl.Path != filepath.Join(dir, "acl.json") ||
+		len(acl.Reach) != 1 || acl.Reach[0].From != "laptop" {
+		t.Fatalf("acl over the admin socket: %+v %v", acl, err)
+	}
 	if conf, err := adm.AddPhone("phone", false); err != nil || !strings.Contains(conf, "AllowedIPs = 10.144.0.0/16") {
 		t.Fatalf("phone: %v\n%s", err, conf)
 	}

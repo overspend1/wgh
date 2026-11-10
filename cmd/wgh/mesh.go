@@ -356,6 +356,7 @@ const adminUsage = `Usage: wgh admin <command> [flags]   (run on the coordinator
   remove    remove a device; its key stops working at once
   phone     add a phone or other plain WireGuard device and show its QR code
   qr        show the QR code of an existing phone again
+  acl       show the access policy (acl.json); 'acl check FILE' validates one
 `
 
 func cmdAdmin(args []string, stdout, stderr io.Writer) error {
@@ -429,6 +430,8 @@ func cmdAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "Added %s. Scan this in the WireGuard app:\n", name)
 		return printQR(stdout, conf)
+	case "acl":
+		return cmdAdminACL(fs, rest, adm, stdout)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, adminUsage)
 		return nil

@@ -111,6 +111,7 @@ sudo systemctl enable --now wgh-serve    # or wgh-up
 | `wgh admin approve <name>` | Approve the routes or exit node a device offers. |
 | `wgh admin remove <name>` | Remove a device. Its key stops working at once. |
 | `wgh admin phone <name> [--exit]` | Add a phone and print its QR code. `wgh admin qr <name>` shows it again. |
+| `wgh admin acl` | The access rules in use and who can reach whom. `wgh admin acl check FILE` validates a file first. |
 | `wgh join <token>` | Join this device. Flags: `--name`, `--advertise-routes`, `--advertise-exit`. |
 | `wgh up` | Connect and stay connected. Flags below. |
 | `wgh down` | Stop a running `wgh up`; the interface goes away. |
@@ -173,6 +174,35 @@ Scan the QR code with the WireGuard app. The phone reaches every device
 through the relay. Its key is made on the coordinator, because a phone cannot
 run `wgh`, so the QR code holds a private key: do not screenshot or share it.
 
+### Access rules
+
+With no rules every device reaches every other one. To limit that, put
+`acl.json` in the coordinator directory (`/var/lib/wgh/coordinator/`):
+
+```json
+{
+  "groups": {"servers": ["pve1", "nas"], "admins": ["laptop"]},
+  "rules": [
+    {"from": ["group:admins"], "to": ["*"]},
+    {"from": ["*"], "to": ["nas"]}
+  ]
+}
+```
+
+A rule lets its `from` devices open connections to its `to` devices, the LAN
+routes they share and their use as an exit node included; replies always come
+back. An entry is a device name, `group:NAME` or `*`. Anything not allowed is
+blocked, in both places it could pass: each Linux device filters what comes in
+on its interface (iptables chain `WGH-wgh0`), and the relay filters what it
+forwards between devices, phones included (`WGH-wgh-relay`). The relay itself
+stays reachable by every device.
+
+The coordinator checks the file every few seconds and applies a change within
+a few more. A file with a mistake is not applied: the previous rules stay and
+`wgh admin acl` shows the error. Run `wgh admin acl check acl.json` before
+copying a new file in. Names of devices that have not joined yet are allowed,
+with a warning.
+
 ### Security notes
 
 - A join token is a password for your mesh until it is used or expires. Send it
@@ -198,7 +228,8 @@ The core works; these are not there yet:
 - `wgh up` runs on Linux only. macOS and Windows join as phones for now.
 - Names come from the hosts file, not a DNS server, so other machines on your
   LAN cannot look them up.
-- No access rules: every device can reach every other one.
+- Access rules work per device, not per port, and a device whose backend has
+  no firewall (macOS) does not filter by itself; the relay still does.
 - A device that is itself only reachable through the relay cannot be an exit
   node yet.
 - Not tested on a real kernel by the automated tests, which run against a fake
@@ -454,6 +485,7 @@ install.sh          one-line installer
 .github/workflows/  tests on push, release builds on v* tags
 internal/mesh/      shared types, join tokens, names
 internal/coord/     the coordinator: device list, API, relay, admin socket
+internal/acl/       access rules (acl.json): parsing and matching
 internal/agent/     the device side: join, long poll, path choice, hosts file
 internal/wgctl/     drives WireGuard with ip, wg and iptables (plus a fake for tests)
 internal/keys/      key generation (tested against RFC 7748 vectors)

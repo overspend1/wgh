@@ -32,7 +32,7 @@ Run wgh with no arguments for the full-screen interface.
 
 Mesh (your own Tailscale):
   serve    run the coordinator and relay, on a server or VPS
-  admin    manage the mesh, on the coordinator: token, devices, approve, remove, phone, qr
+  admin    manage the mesh, on the coordinator: token, devices, approve, remove, phone, qr, acl
   join     join this device with a token from 'wgh admin token'
   up       connect and keep WireGuard set up (needs root)
   down     stop a running 'wgh up'

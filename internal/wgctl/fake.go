@@ -53,6 +53,10 @@ type Fake struct {
 	forward bool
 	bypass  []netip.Addr
 	hs      map[string]time.Time
+
+	filterOn    bool
+	filterScope FilterScope
+	filter      []FilterRule
 }
 
 // NewFake returns a fake backend, optionally attached to a network.
@@ -270,6 +274,7 @@ func (f *Fake) SetBypass(_ string, hosts []netip.Addr) error {
 func (f *Fake) Down(name string) error {
 	f.mu.Lock()
 	f.ifc, f.peers, f.routes, f.exit, f.forward, f.bypass = nil, nil, nil, false, false, nil
+	f.filterOn, f.filter = false, nil
 	f.mu.Unlock()
 	f.logf("[dry-run] remove %s", name)
 	return nil
@@ -284,6 +289,10 @@ type Snapshot struct {
 	Exit    bool
 	Forward bool
 	Bypass  []netip.Addr // last SetBypass
+	// Filter is set when an access filter is on; FilterRules may be empty.
+	Filter      bool
+	FilterScope FilterScope
+	FilterRules []FilterRule
 }
 
 // Snapshot returns the current configuration.
@@ -292,7 +301,8 @@ func (f *Fake) Snapshot() Snapshot {
 	defer f.mu.Unlock()
 	s := Snapshot{Up: f.ifc != nil, Peers: append([]Peer(nil), f.peers...),
 		Routes: append([]string(nil), f.routes...), Exit: f.exit, Forward: f.forward,
-		Bypass: append([]netip.Addr(nil), f.bypass...)}
+		Bypass: append([]netip.Addr(nil), f.bypass...),
+		Filter: f.filterOn, FilterScope: f.filterScope, FilterRules: append([]FilterRule(nil), f.filter...)}
 	if f.ifc != nil {
 		s.Address = f.ifc.Address
 	}
