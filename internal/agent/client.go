@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -49,7 +50,7 @@ func NewClient(baseURL, pin, apiKey string) *Client {
 					return errors.New("coordinator sent no certificate")
 				}
 				h := sha256.Sum256(cs.PeerCertificates[0].Raw)
-				if base64.RawURLEncoding.EncodeToString(h[:]) != pin {
+				if subtle.ConstantTimeCompare([]byte(base64.RawURLEncoding.EncodeToString(h[:16])), []byte(pin)) != 1 {
 					return errors.New("coordinator certificate does not match the pin in the join token")
 				}
 				return nil

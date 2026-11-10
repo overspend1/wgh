@@ -271,3 +271,36 @@ func Export(s *state.State, dir string, withQR bool) ([]string, error) {
 	}
 	return written, nil
 }
+
+// Ago describes how long before now t was, in a few characters.
+func Ago(now, t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	d := now.Sub(t)
+	switch {
+	case d < 0:
+		return "just now"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+}
+
+// Bytes formats a byte count like 1.2 MiB.
+func Bytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}

@@ -126,10 +126,11 @@ func loadOrCreateCert(dir string, hosts []string) (tls.Certificate, string, erro
 	return c, Pin(c.Certificate[0]), nil
 }
 
-// Pin returns the pin of a DER certificate.
+// Pin returns the pin of a DER certificate: the first 16 bytes of its
+// SHA-256, base64url.
 func Pin(der []byte) string {
 	h := sha256.Sum256(der)
-	return base64.RawURLEncoding.EncodeToString(h[:])
+	return base64.RawURLEncoding.EncodeToString(h[:16])
 }
 
 func makeCert(certPath, keyPath string, hosts []string) error {

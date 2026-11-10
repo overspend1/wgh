@@ -72,7 +72,7 @@ func TestServeOverTLSAndAdminSocket(t *testing.T) {
 
 	// A token whose pin doesn't match is refused before anything is sent.
 	tk, _ := mesh.ParseToken(tok)
-	bad := mesh.Token{URL: tk.URL, Pin: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", Secret: tk.Secret}.Encode()
+	bad := mesh.Token{URL: tk.URL, Pin: "AAAAAAAAAAAAAAAAAAAAAA", Secret: tk.Secret}.Encode()
 	if _, err := agent.Join(context.Background(), filepath.Join(dir, "bad.json"), agent.JoinOptions{Token: bad, Name: "evil"}); err == nil ||
 		!strings.Contains(err.Error(), "does not match the pin") {
 		t.Fatalf("join with wrong pin: %v", err)

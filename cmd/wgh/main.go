@@ -1,6 +1,6 @@
-// Command wgh manages a small WireGuard server and its peers as plain files:
-// keys, wg-quick configs and QR codes. It never touches a network interface
-// and never needs root. Run it with no arguments for the full-screen TUI.
+// Command wgh is a self-hosted WireGuard mesh (a coordinator, a relay and an
+// agent on each device) and a simple helper that writes WireGuard configs
+// and QR codes. Run it with no arguments for the full-screen TUI.
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/overspend1/wgh/internal/agent"
 	"github.com/overspend1/wgh/internal/app"
 	"github.com/overspend1/wgh/internal/render"
 	"github.com/overspend1/wgh/internal/state"
@@ -25,15 +26,22 @@ import (
 
 var version = "dev"
 
-const usage = `wgh: a small WireGuard helper that only writes files.
+const usage = `wgh: a self-hosted WireGuard mesh, and a simple WireGuard config helper.
 
-Run wgh with no arguments to open the full-screen interface.
+Run wgh with no arguments for the full-screen interface.
 
-Usage:
-  wgh [command] [flags] [args]
+Mesh (your own Tailscale):
+  serve    run the coordinator and relay, on a server or VPS
+  admin    manage the mesh, on the coordinator: token, devices, approve, remove, phone, qr
+  join     join this device with a token from 'wgh admin token'
+  up       connect and keep WireGuard set up (needs root)
+  down     stop a running 'wgh up'
+  status   show devices, paths and traffic
+  exit     send internet traffic through a device: wgh exit <name>, or wgh exit off
+  rotate   switch this device to a new WireGuard key
+  leave    leave the mesh and delete this device's key
 
-Commands:
-  tui      open the full-screen interface (the default in a terminal)
+Simple server (only writes config files and QR codes, never needs root):
   init     create the server (keys, subnet, port, endpoint)
   add      add a peer with the next free address
   list     list peers
@@ -42,11 +50,13 @@ Commands:
   qr       print a peer's config as a QR code (or save a PNG)
   server   print the server config
   export   write the server and all client configs to a directory
+
+Other:
+  tui      open the full-screen interface (the default in a terminal)
   update   check for and install a newer wgh release
   version  print the version
 
-Every command takes --state PATH (default $WGH_STATE, else
-~/.config/wgh/state.json). Run 'wgh <command> -h' for its flags.
+Run 'wgh <command> -h' for its flags.
 `
 
 func main() {
@@ -95,6 +105,24 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cmdServer(rest, stdout, stderr)
 	case "export":
 		return cmdExport(rest, stdout, stderr)
+	case "serve", "coordinator":
+		return cmdServe(rest, stdout, stderr)
+	case "admin":
+		return cmdAdmin(rest, stdout, stderr)
+	case "join":
+		return cmdJoin(rest, stdout, stderr)
+	case "up":
+		return cmdUp(rest, stdout, stderr)
+	case "down":
+		return cmdDown(rest, stdout, stderr)
+	case "status", "st":
+		return cmdStatus(rest, stdout, stderr)
+	case "exit":
+		return cmdExit(rest, stdout, stderr)
+	case "rotate":
+		return cmdRotate(rest, stdout, stderr)
+	case "leave":
+		return cmdLeave(rest, stdout, stderr)
 	case "update", "self-update", "upgrade":
 		return cmdUpdate(rest, stdout, stderr, update.Default(), os.Executable)
 	case "version", "--version", "-v":
@@ -163,13 +191,16 @@ func cmdTUI(args []string, _, stderr io.Writer) error {
 	fs, statePath := newFlags("tui", stderr)
 	noCheck := fs.Bool("no-update-check", os.Getenv("WGH_NO_UPDATE_CHECK") != "",
 		"don't look for a newer release on start (also: WGH_NO_UPDATE_CHECK=1)")
+	agentState := fs.String("agent-state", agent.DefaultPath(), "this device's mesh state file")
+	coordDir := fs.String("dir", defaultCoordDir(), "coordinator directory, for the Admin tab")
 	if err := noPositional(fs, args); err != nil {
 		return err
 	}
 	if !isTerminal() {
 		return errors.New("the interface needs a terminal; use the subcommands in scripts")
 	}
-	return tui.Run(tui.Options{StatePath: *statePath, Version: version, CheckUpdates: !*noCheck})
+	return tui.Run(tui.Options{StatePath: *statePath, Version: version, CheckUpdates: !*noCheck,
+		AgentState: *agentState, CoordDir: *coordDir})
 }
 
 func cmdInit(args []string, stdout, stderr io.Writer) error {

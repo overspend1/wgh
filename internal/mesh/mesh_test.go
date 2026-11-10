@@ -6,10 +6,12 @@ import (
 )
 
 func TestTokenRoundTrip(t *testing.T) {
-	in := Token{URL: "https://vpn.example.com:8443", Pin: "abc", Secret: "s3cret"}
+	pin, _ := RandomSecret(16)
+	sec, _ := RandomSecret(16)
+	in := Token{URL: "https://vpn.example.com:8443", Pin: pin, Secret: sec}
 	s := in.Encode()
-	if !strings.HasPrefix(s, "wgh1_") || strings.ContainsAny(s, " +/=") {
-		t.Fatalf("token %q is not copy-paste friendly", s)
+	if !strings.HasPrefix(s, "wgh1_") || strings.ContainsAny(s, " +/=") || len(s) > 90 {
+		t.Fatalf("token %q (%d chars) is not copy-paste friendly", s, len(s))
 	}
 	out, err := ParseToken("  " + s + "\n")
 	if err != nil {
@@ -18,7 +20,11 @@ func TestTokenRoundTrip(t *testing.T) {
 	if out != in {
 		t.Fatalf("round trip: %+v", out)
 	}
-	for _, bad := range []string{"", "wgh1_!!!", "tskey-abc", Token{URL: "ftp://x", Secret: "s"}.Encode(), Token{URL: "https://x"}.Encode()} {
+	plain, err := ParseToken(Token{URL: "http://10.0.0.1:8080", Secret: sec}.Encode())
+	if err != nil || plain.Pin != "" || plain.URL != "http://10.0.0.1:8080" || plain.Secret != sec {
+		t.Fatalf("no-pin token: %+v %v", plain, err)
+	}
+	for _, bad := range []string{"", "wgh1_!!!", "tskey-abc", s[:30], Token{URL: "ftp://x", Secret: sec}.Encode()} {
 		if _, err := ParseToken(bad); err == nil {
 			t.Errorf("ParseToken(%q) succeeded", bad)
 		}

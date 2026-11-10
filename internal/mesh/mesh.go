@@ -9,7 +9,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -66,20 +65,43 @@ func CleanName(s string) string {
 	return out
 }
 
-// Token is what 'wgh join' needs to reach a coordinator: its URL, the
-// SHA-256 pin of its TLS certificate (empty for a publicly trusted
-// certificate) and a one-time secret.
+// Token is what 'wgh join' needs to reach a coordinator: its URL, the pin
+// of its TLS certificate (empty for a publicly trusted certificate) and a
+// one-time secret. Pin and Secret are base64url, 16 bytes each.
 type Token struct {
-	URL    string `json:"u"`
-	Pin    string `json:"p,omitempty"`
-	Secret string `json:"s"`
+	URL    string
+	Pin    string
+	Secret string
 }
 
 const tokenPrefix = "wgh1_"
 
+// Token layout before base64url: one flag byte, the 16-byte pin when flag
+// bit 1 is set, the 16-byte secret, then the URL without "https://" when flag
+// bit 2 is set. It keeps a token short enough to paste in one line.
+const (
+	flagPin   = 1
+	flagHTTPS = 2
+)
+
 // Encode renders the token as a single copy-pasteable string.
 func (t Token) Encode() string {
-	b, _ := json.Marshal(t)
+	pin, _ := base64.RawURLEncoding.DecodeString(t.Pin)
+	sec, _ := base64.RawURLEncoding.DecodeString(t.Secret)
+	var flags byte
+	b := []byte{0}
+	if len(pin) == 16 {
+		flags |= flagPin
+		b = append(b, pin...)
+	}
+	b = append(b, sec...)
+	u := t.URL
+	if rest, ok := strings.CutPrefix(u, "https://"); ok {
+		flags |= flagHTTPS
+		u = rest
+	}
+	b[0] = flags
+	b = append(b, u...)
 	return tokenPrefix + base64.RawURLEncoding.EncodeToString(b)
 }
 
@@ -90,18 +112,24 @@ func ParseToken(s string) (Token, error) {
 		return Token{}, errors.New("not a wgh join token (it should start with wgh1_)")
 	}
 	b, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(s, tokenPrefix))
-	if err != nil {
-		return Token{}, fmt.Errorf("join token is damaged: %w", err)
+	if err != nil || len(b) < 1+16+1 {
+		return Token{}, errors.New("join token is damaged or cut off: copy all of it")
 	}
 	var t Token
-	if err := json.Unmarshal(b, &t); err != nil {
-		return Token{}, fmt.Errorf("join token is damaged: %w", err)
+	flags, b := b[0], b[1:]
+	if flags&flagPin != 0 {
+		if len(b) < 32+1 {
+			return Token{}, errors.New("join token is damaged or cut off: copy all of it")
+		}
+		t.Pin, b = base64.RawURLEncoding.EncodeToString(b[:16]), b[16:]
+	}
+	t.Secret, b = base64.RawURLEncoding.EncodeToString(b[:16]), b[16:]
+	t.URL = string(b)
+	if flags&flagHTTPS != 0 {
+		t.URL = "https://" + t.URL
 	}
 	if !strings.HasPrefix(t.URL, "https://") && !strings.HasPrefix(t.URL, "http://") {
 		return Token{}, errors.New("join token has no coordinator URL")
-	}
-	if t.Secret == "" {
-		return Token{}, errors.New("join token has no secret")
 	}
 	return t, nil
 }
@@ -161,10 +189,10 @@ type UpdateRequest struct {
 
 // Node is one device as the rest of the mesh sees it.
 type Node struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Address   string    `json:"address"`
-	PublicKey string    `json:"public_key"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Address   string `json:"address"`
+	PublicKey string `json:"public_key"`
 	// Endpoints are candidate UDP addresses to try, best first: what the
 	// relay saw, then the source of its last heartbeat, then its LAN.
 	Endpoints []string  `json:"endpoints,omitempty"`

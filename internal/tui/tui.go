@@ -47,11 +47,20 @@ type Options struct {
 	Updater *update.Client
 	// Now is used for peer timestamps; nil means time.Now.
 	Now func() time.Time
+
+	// AgentState is this device's mesh state file (default agent.DefaultPath).
+	AgentState string
+	// CoordDir is the coordinator directory; its admin socket enables the
+	// Admin tab.
+	CoordDir string
+	// Agent and Admin replace the socket clients, for tests.
+	Agent AgentAPI
+	Admin AdminAPI
 }
 
 // Run opens the TUI and blocks until the user quits.
 func Run(o Options) error {
-	m, err := New(o)
+	m, err := NewApp(o)
 	if err != nil {
 		return err
 	}
@@ -642,7 +651,19 @@ func highlightConf(conf string) string {
 // View
 
 func (m *Model) View() string {
-	var body, keys string
+	body, status, keys := m.Parts()
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.viewHeader(),
+		"",
+		lipgloss.NewStyle().Padding(0, 2).Render(body),
+		"",
+		lipgloss.NewStyle().Padding(0, 2).Render(status),
+		lipgloss.NewStyle().Padding(0, 2).Render(keys),
+	)
+}
+
+// Parts renders the screen without the header, for embedding.
+func (m *Model) Parts() (body, status, keys string) {
 	switch m.screen {
 	case screenInit:
 		body = m.viewForm("Set up your WireGuard server",
@@ -677,35 +698,38 @@ func (m *Model) View() string {
 		keys = keyHelp("p", "save PNG", "c", "config", "esc", "back")
 	}
 
-	status := ""
-	if m.msg != "" {
-		if m.msgIsErr {
-			status = errStyle.Render("✗ " + m.msg)
-		} else {
-			status = okStyle.Render("✓ " + m.msg)
-		}
+	status = statusLine(m.msg, m.msgIsErr)
+	return body, status, keys
+}
+
+func statusLine(msg string, isErr bool) string {
+	switch {
+	case msg == "":
+		return ""
+	case isErr:
+		return errStyle.Render("✗ " + msg)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		m.viewHeader(),
-		"",
-		lipgloss.NewStyle().Padding(0, 2).Render(body),
-		"",
-		lipgloss.NewStyle().Padding(0, 2).Render(status),
-		lipgloss.NewStyle().Padding(0, 2).Render(keys),
-	)
+	return okStyle.Render("✓ " + msg)
+}
+
+// Info is the one-line summary shown in the header.
+func (m *Model) Info() string {
+	if m.st == nil {
+		return "simple server not set up"
+	}
+	s := m.st.Server
+	peers := fmt.Sprintf("%d peers", len(m.st.Peers))
+	if len(m.st.Peers) == 1 {
+		peers = "1 peer"
+	}
+	return fmt.Sprintf("%s  %s  %s  %s", s.Interface, s.Subnet, render.Endpoint(s.Endpoint, s.ListenPort), peers)
 }
 
 func (m *Model) viewHeader() string {
 	left := titleBar.Render("wgh")
 	info := ""
 	if m.st != nil {
-		s := m.st.Server
-		peers := fmt.Sprintf("%d peers", len(m.st.Peers))
-		if len(m.st.Peers) == 1 {
-			peers = "1 peer"
-		}
-		info = fmt.Sprintf("%s  %s  %s  %s", s.Interface, s.Subnet,
-			render.Endpoint(s.Endpoint, s.ListenPort), peers)
+		info = m.Info()
 	}
 	right := ""
 	if m.latest != "" {

@@ -228,7 +228,7 @@ func (s *Server) NewToken(ttl time.Duration, reusable, approve bool) (string, er
 	if ttl <= 0 {
 		ttl = time.Hour
 	}
-	secret, err := mesh.RandomSecret(24)
+	secret, err := mesh.RandomSecret(16)
 	if err != nil {
 		return "", err
 	}
@@ -278,7 +278,7 @@ func (s *Server) Join(req mesh.JoinRequest, seenIP string) (mesh.JoinResponse, e
 		return mesh.JoinResponse{}, err
 	}
 	d.PublicKey, d.KeyHash, d.OS, d.Version = req.PublicKey, mesh.Hash(apiKey), req.OS, req.Version
-	d.AutoApprove, d.SeenIP, d.LastSeen = tok.Approve, seenIP, now
+	d.AutoApprove, d.SeenIP = tok.Approve, seenIP
 	if tok.Reusable {
 		tok.Uses++
 	} else {
@@ -430,7 +430,7 @@ func (s *Server) AddStatic(name string, exit bool) (string, error) {
 		s.mu.Unlock()
 		return "", err
 	}
-	d.Static, d.StaticPrivate, d.StaticExit, d.PublicKey, d.OS = true, kp.Private, exit, kp.Public, "wireguard app"
+	d.Static, d.StaticPrivate, d.StaticExit, d.PublicKey, d.OS = true, kp.Private, exit, kp.Public, "wireguard"
 	s.st.Devices = append(s.st.Devices, d)
 	s.bumpLocked()
 	s.saveLocked()
