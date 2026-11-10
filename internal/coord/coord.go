@@ -489,21 +489,79 @@ func (s *Server) nodeLocked(d *device, viewer *device) mesh.Node {
 	if d.Static {
 		return n
 	}
-	var public []string
+	n.Endpoints = endpointsFor(d, viewer)
+	return n
+}
+
+// endpointsFor orders the addresses viewer should try to reach d at.
+//
+//   - A global IPv6 address needs no NAT traversal at all, so when both
+//     devices have one it goes first. When the viewer has none, d's IPv6
+//     addresses are left out: they would only waste a try.
+//   - Then the public address the relay saw, then the public address of
+//     d's last heartbeat with its listen port (the STUN-like guesses).
+//   - LAN addresses last, or first when both devices sit behind the same
+//     public address, where the LAN works and hairpinning often doesn't.
+func endpointsFor(d, viewer *device) []string {
+	var public, lan, v6 []string
 	if d.RelayEndpoint != "" {
 		public = append(public, d.RelayEndpoint)
 	}
 	if d.SeenIP != "" && d.ListenPort > 0 {
 		public = append(public, net.JoinHostPort(d.SeenIP, strconv.Itoa(d.ListenPort)))
 	}
-	// Two devices behind the same public address are probably on the same
-	// LAN, where the LAN address works and hairpinning often doesn't.
-	if viewer != nil && viewer.SeenIP != "" && viewer.SeenIP == d.SeenIP {
-		n.Endpoints = dedupe(append(append([]string(nil), d.Local...), public...))
-	} else {
-		n.Endpoints = dedupe(append(public, d.Local...))
+	for _, e := range d.Local {
+		if ap, err := netip.ParseAddrPort(e); err == nil && ap.Addr().Is6() && !ap.Addr().Is4In6() {
+			v6 = append(v6, e)
+		} else {
+			lan = append(lan, e)
+		}
 	}
-	return n
+	viewer6 := viewer == nil
+	if viewer != nil {
+		for _, e := range viewer.Local {
+			if ap, err := netip.ParseAddrPort(e); err == nil && ap.Addr().Is6() && !ap.Addr().Is4In6() {
+				viewer6 = true
+				break
+			}
+		}
+		// Keep public IPv6 guesses only when the viewer can use them.
+		if !viewer6 {
+			public = slices.DeleteFunc(public, func(e string) bool {
+				ap, err := netip.ParseAddrPort(e)
+				return err == nil && ap.Addr().Is6() && !ap.Addr().Is4In6()
+			})
+		}
+	}
+	var out []string
+	if viewer6 {
+		out = append(out, v6...)
+	}
+	if viewer != nil && sameSite(viewer.SeenIP, d.SeenIP) {
+		out = append(append(out, lan...), public...)
+	} else {
+		out = append(append(out, public...), lan...)
+	}
+	return dedupe(out)
+}
+
+// sameSite reports whether two heartbeat source addresses look like the
+// same network: the same IPv4 address (one NAT), or the same IPv6 /64.
+func sameSite(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	x, err1 := netip.ParseAddr(a)
+	y, err2 := netip.ParseAddr(b)
+	if err1 != nil || err2 != nil {
+		return a == b
+	}
+	x, y = x.Unmap(), y.Unmap()
+	if x.Is6() && y.Is6() {
+		px, _ := x.Prefix(64)
+		return px.Contains(y)
+	}
+	return x == y
 }
 
 func (s *Server) relayLocked() *mesh.Relay {

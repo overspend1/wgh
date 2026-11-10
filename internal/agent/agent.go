@@ -629,8 +629,12 @@ func dedupe(in []string) []string {
 	return out
 }
 
-// localAddrs lists this machine's IPv4 addresses that another device on the
-// same network might reach.
+// meshULA is the mesh's own IPv6 range, never offered as an endpoint.
+var meshULA = netip.MustParsePrefix("fd77:6768::/64")
+
+// localAddrs lists this machine's IPv4 and IPv6 addresses that another
+// device might reach: LAN addresses, and global IPv6 addresses, which other
+// devices with IPv6 can reach without NAT traversal.
 func localAddrs() []netip.Addr {
 	ifs, err := net.Interfaces()
 	if err != nil {
@@ -648,7 +652,14 @@ func localAddrs() []netip.Addr {
 				continue
 			}
 			ip := pfx.Addr()
-			if ip.Is4() && !ip.IsLinkLocalUnicast() && !ip.IsLoopback() {
+			switch {
+			case ip.IsLinkLocalUnicast() || ip.IsLoopback() || !ip.IsGlobalUnicast():
+			case ip.Is4():
+				out = append(out, ip)
+			case meshULA.Contains(ip):
+				// the mesh's own IPv6 range: not a way to reach this machine
+			default:
+				// A global IPv6 address needs no NAT traversal; a ULA works on the LAN.
 				out = append(out, ip)
 			}
 		}
