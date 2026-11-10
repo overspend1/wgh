@@ -152,13 +152,15 @@ func TestMeshDNS(t *testing.T) {
 		return strings.Contains(string(h), "10.144.0.3\tpve1 pve1.wgh")
 	})
 
-	// A removed peer leaves the DNS too.
+	// A removed peer leaves the DNS too. Wait until pve1 has configured
+	// its own resolver, so there is something for it to revert.
+	eventually(t, "pve1's resolver", func() bool { return len(runs["pve1"].all()) == 3 })
 	if err := r.srv.Remove("pve1"); err != nil {
 		t.Fatal(err)
 	}
 	err := <-b.done
 	b.done <- err
-	if got := runs["pve1"].all(); got[len(got)-1] != "resolvectl revert wgh0" {
+	if got := runs["pve1"].all(); len(got) == 0 || got[len(got)-1] != "resolvectl revert wgh0" {
 		t.Errorf("pve1 did not revert the resolver: %v", got)
 	}
 	eventually(t, "pve1 gone from laptop's DNS", func() bool {
