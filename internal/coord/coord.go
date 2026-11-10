@@ -27,6 +27,7 @@ import (
 	"github.com/overspend1/wgh/internal/ipam"
 	"github.com/overspend1/wgh/internal/keys"
 	"github.com/overspend1/wgh/internal/mesh"
+	"github.com/overspend1/wgh/internal/portmap"
 	"github.com/overspend1/wgh/internal/render"
 	"github.com/overspend1/wgh/internal/wgctl"
 )
@@ -346,6 +347,9 @@ func (s *Server) Update(apiKey string, req mesh.UpdateRequest, seenIP string) er
 	if req.Exit != d.Exit {
 		d.Exit, changed = req.Exit, true
 	}
+	if m := usableMapped(req.Mapped); m != d.Mapped {
+		d.Mapped, changed = m, true
+	}
 	if req.ExitViaRelay != d.WantRelayExit {
 		d.WantRelayExit, changed = req.ExitViaRelay, true
 	}
@@ -495,8 +499,18 @@ func (s *Server) nodeLocked(d *device, viewer *device) mesh.Node {
 	if d.Static {
 		return n
 	}
-	n.Endpoints = endpointsFor(d, viewer)
+	n.Endpoints, n.Mapped = endpointsFor(d, viewer), d.Mapped
 	return n
+}
+
+// usableMapped keeps a mapped endpoint only when it is a public IPv4
+// address and port; anything else is dropped.
+func usableMapped(s string) string {
+	ap, err := netip.ParseAddrPort(s)
+	if err != nil || ap.Port() == 0 || !portmap.Usable(ap.Addr()) {
+		return ""
+	}
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()).String()
 }
 
 // endpointsFor orders the addresses viewer should try to reach d at.
@@ -504,12 +518,17 @@ func (s *Server) nodeLocked(d *device, viewer *device) mesh.Node {
 //   - A global IPv6 address needs no NAT traversal at all, so when both
 //     devices have one it goes first. When the viewer has none, d's IPv6
 //     addresses are left out: they would only waste a try.
-//   - Then the public address the relay saw, then the public address of
-//     d's last heartbeat with its listen port (the STUN-like guesses).
+//   - Then the public guesses: the port d's router forwards to it (PCP,
+//     NAT-PMP or UPnP), which works even behind a symmetric NAT, then the
+//     public address the relay saw, then the public address of d's last
+//     heartbeat with its listen port (the STUN-like guesses).
 //   - LAN addresses last, or first when both devices sit behind the same
 //     public address, where the LAN works and hairpinning often doesn't.
 func endpointsFor(d, viewer *device) []string {
 	var public, lan, v6 []string
+	if d.Mapped != "" {
+		public = append(public, d.Mapped)
+	}
 	if d.RelayEndpoint != "" {
 		public = append(public, d.RelayEndpoint)
 	}

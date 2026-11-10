@@ -136,6 +136,12 @@ type Options struct {
 	// per-domain file there instead of systemd-resolved. It defaults to
 	// /etc/resolver on macOS.
 	ResolverDir string
+
+	// PortMap asks the router to forward the WireGuard port (PCP, NAT-PMP
+	// or UPnP) and tells the coordinator the outside address.
+	PortMap      bool
+	PortMapper   PortMapper    // test hook; nil means a portmap.Mapper
+	PortMapRetry time.Duration // first retry after a failure; 0 means a minute
 }
 
 type path struct {
@@ -175,6 +181,8 @@ type Agent struct {
 	dns       dnsState
 	noForward error    // the backend can't forward: routes and exit are not offered
 	res       resolver // bypass hosts, for backends that need them
+	mapped    string   // public ip:port the router forwards to us, sent in heartbeats
+	portMap   string   // port-mapping state for status
 }
 
 // New loads the device state and prepares an agent.
@@ -266,6 +274,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			defer closeSock()
 		}
 	}
+
+	// Remove the router's port mapping before the interface goes down.
+	defer a.startPortMap(ctx)()
 
 	errc := make(chan error, 2)
 	go func() { errc <- a.pollLoop(ctx) }()
@@ -375,7 +386,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) error {
 func (a *Agent) heartbeat(ctx context.Context, newPub string) error {
 	a.mu.Lock()
 	req := mesh.UpdateRequest{ListenPort: a.st.ListenPort, Routes: a.st.Routes, Exit: a.st.Exit,
-		PublicKey: newPub, OS: runtime.GOOS, Version: a.o.Version, ExitViaRelay: a.relayExit}
+		PublicKey: newPub, OS: runtime.GOOS, Version: a.o.Version, ExitViaRelay: a.relayExit, Mapped: a.mapped}
 	if a.noForward != nil {
 		req.Routes, req.Exit = nil, false // nothing to offer: this system can't forward
 	}

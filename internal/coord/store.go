@@ -65,6 +65,9 @@ type device struct {
 	Online        bool      `json:"-"`
 	Rx            int64     `json:"-"`
 	Tx            int64     `json:"-"`
+	// Mapped is the ip:port the device's router forwards to it (runtime
+	// only: the next heartbeat sends it again).
+	Mapped string `json:"-"`
 }
 
 type token struct {

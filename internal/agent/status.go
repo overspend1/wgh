@@ -66,6 +66,9 @@ type Status struct {
 	Version       string       `json:"version"`
 	Peers         []PeerStatus `json:"peers"`
 	At            time.Time    `json:"at"`
+	// PortMap is the router port mapping: "UPnP 203.0.113.5:41820",
+	// "none found", "off" and the like.
+	PortMap string `json:"portmap,omitempty"`
 }
 
 // Status reports the current state.
@@ -76,7 +79,10 @@ func (a *Agent) Status() Status {
 		ListenPort: a.st.ListenPort, URL: a.st.URL, Connected: a.connected, LastError: a.lastErr,
 		ExitNode: a.st.ExitNode, ExitActive: a.exitOn, ExitNote: a.exitNote, Routes: a.st.Routes,
 		AdvertiseExit: a.st.Exit, DryRun: a.o.DryRun, Version: a.o.Version, At: a.o.Now(),
-		DNS: a.dnsModeLocked(), ForwardNote: a.forwardNoteLocked()}
+		DNS: a.dnsModeLocked(), ForwardNote: a.forwardNoteLocked(), PortMap: a.portMap}
+	if s.PortMap == "" {
+		s.PortMap = portMapOff
+	}
 	if a.nm == nil {
 		return s
 	}
