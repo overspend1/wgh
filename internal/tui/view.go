@@ -290,6 +290,22 @@ func devNotes(s *agent.Status) string {
 	if s.ExitNode != "" && !s.ExitActive && s.ExitNote != "" {
 		lines = append(lines, errStyle.Render("Exit node: ")+value.Render(s.ExitNote))
 	}
+	if s.ExitNode != "" && s.ExitActive && s.ExitNote != "" {
+		lines = append(lines, hint.Render("Exit node: "+s.ExitNote))
+	}
+	if s.ForwardNote != "" {
+		lines = append(lines, hint.Render(s.ForwardNote))
+	}
+	var facts []string
+	if s.PortMap != "" {
+		facts = append(facts, "router port "+s.PortMap)
+	}
+	if s.DNS != "" {
+		facts = append(facts, "names "+s.DNS)
+	}
+	if len(facts) > 0 {
+		lines = append(lines, hint.Render(strings.Join(facts, " · ")))
+	}
 	if len(s.PendingRoutes) > 0 || s.PendingExit {
 		lines = append(lines, hint.Render("This device's shared routes or exit node wait for approval on the coordinator."))
 	}

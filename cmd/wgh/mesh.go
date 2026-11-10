@@ -136,6 +136,7 @@ func cmdUp(args []string, stdout, stderr io.Writer) error {
 	acceptRoutes := fs.String("accept-routes", "", "use routes other devices share: true or false (default true)")
 	hostsPath := fs.String("hosts", "/etc/hosts", "hosts file for device names (\"\" to leave it alone)")
 	dnsFlag := fs.String("dns", "", "serve device names with a built-in DNS server through systemd-resolved: true or false (default true)")
+	portMap := fs.String("portmap", "", "ask the router to forward the WireGuard port (PCP, NAT-PMP or UPnP): true or false (default true)")
 	if err := noPositional(fs, args); err != nil {
 		return err
 	}
@@ -169,6 +170,11 @@ func cmdUp(args []string, stdout, stderr io.Writer) error {
 	} else if ok {
 		st.NoDNS, changed = !v, true
 	}
+	if v, ok, err := optBool(*portMap, "--portmap"); err != nil {
+		return err
+	} else if ok {
+		st.NoPortMap, changed = !v, true
+	}
 	var backend wgctl.Backend
 	hosts := *hostsPath
 	if *dry {
@@ -201,7 +207,7 @@ func cmdUp(args []string, stdout, stderr io.Writer) error {
 	// In a dry run the agent prints what DNS would do instead of listening on
 	// port 53 or running resolvectl.
 	a, err := agent.New(agent.Options{StatePath: *statePath, Backend: backend, HostsPath: hosts, Version: version,
-		DryRun: *dry, Logf: logger(stdout), DNS: !st.NoDNS})
+		DryRun: *dry, Logf: logger(stdout), DNS: !st.NoDNS, PortMap: !st.NoPortMap})
 	if err != nil {
 		return err
 	}
@@ -275,6 +281,9 @@ func printStatus(w io.Writer, s agent.Status) {
 	fmt.Fprintf(w, "%s  %s  %s\n", s.Name, addr, conn)
 	if s.DNS != "" {
 		fmt.Fprintf(w, "dns %s\n", s.DNS)
+	}
+	if s.PortMap != "" {
+		fmt.Fprintf(w, "portmap %s\n", s.PortMap)
 	}
 	if s.ExitNode != "" {
 		state := "on"
@@ -488,6 +497,9 @@ func printAdmin(w io.Writer, st coord.Status, now time.Time) {
 		}
 		if d.Static {
 			note = append(note, "phone")
+		}
+		if d.Mapped != "" {
+			note = append(note, "port mapped "+d.Mapped)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", d.Name, d.Address, status, app.Ago(now, d.LastSeen),
 			orDash(d.OS), orNone(append(append([]string(nil), d.Routes...), d.PendingRoutes...)), strings.Join(note, ", "))

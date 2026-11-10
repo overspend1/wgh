@@ -193,7 +193,8 @@ type JoinResponse struct {
 }
 
 // UpdateRequest is the agent's heartbeat. Zero fields are left unchanged
-// except Endpoints, Routes and Exit, which always replace what was there.
+// except Endpoints, Routes, Exit and Mapped, which always replace what was
+// there.
 type UpdateRequest struct {
 	ListenPort int      `json:"listen_port"`
 	Endpoints  []string `json:"endpoints,omitempty"`
@@ -207,6 +208,10 @@ type UpdateRequest struct {
 	// ExitViaRelay names the exit node this device wants but has no direct
 	// path to, asking the relay to carry its internet traffic there.
 	ExitViaRelay string `json:"exit_via_relay,omitempty"`
+	// Mapped is the public ip:port the device's router forwards to its
+	// WireGuard port (PCP, NAT-PMP or UPnP); "" when there is none. Like
+	// Endpoints it always replaces what was there.
+	Mapped string `json:"mapped_endpoint,omitempty"`
 }
 
 // Node is one device as the rest of the mesh sees it.
@@ -238,6 +243,9 @@ type Node struct {
 	// CanConnect: this peer may open connections to the device receiving
 	// the map. It is only enforced when NetMap.ACL is set.
 	CanConnect bool `json:"can_connect,omitempty"`
+	// Mapped is the port its router forwards for it, also first among the
+	// public guesses in Endpoints.
+	Mapped string `json:"mapped_endpoint,omitempty"`
 }
 
 // Relay is the coordinator's own WireGuard peer: it relays traffic when two

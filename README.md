@@ -139,6 +139,7 @@ sudo systemctl enable --now wgh-serve    # or wgh-up
 | `--accept-routes=false` | ignore routes other devices share |
 | `--dns=false` | no built-in DNS server; names come from the hosts file only |
 | `--hosts ""` | leave `/etc/hosts` alone |
+| `--portmap=false` | don't ask the router to forward the WireGuard port |
 | `--dry-run` | print what would be done, change nothing |
 
 ### How it works
@@ -156,6 +157,12 @@ sudo systemctl enable --now wgh-serve    # or wgh-up
   it come from (that is the STUN-style part), its listen port on that address,
   and its LAN addresses, LAN first when two devices sit behind the same router
   or the same IPv6 network. Whatever answers is used.
+- **Router port mapping.** `wgh up` asks the home router to forward its
+  WireGuard port, with PCP, NAT-PMP or UPnP IGD, renews it every hour and
+  removes it on exit. The forwarded address is tried first among the public
+  guesses, so a device behind a strict NAT still gets direct paths when its
+  router cooperates. `wgh status` shows what it got; behind a second NAT the
+  mapping is skipped as useless.
 - **Relay when it has to.** Until a direct path answers, traffic goes through
   the relay on the coordinator. When a direct path appears, traffic moves onto
   it within seconds; if it breaks, it falls back.
@@ -252,8 +259,9 @@ with a warning.
 
 The core works; these are not there yet:
 
-- Devices behind two strict (symmetric) NATs never get a direct path and stay
-  on the relay. No port prediction or birthday tricks yet.
+- Devices behind two strict (symmetric) NATs whose routers won't forward a
+  port never get a direct path and stay on the relay. No port prediction or
+  birthday tricks yet.
 - `wgh up` runs on Linux and macOS. Windows joins as a phone for now.
 - A Mac does not filter incoming traffic by itself, so access rules on a Mac
   are enforced by the other side and by the relay only. Its exit-node routing

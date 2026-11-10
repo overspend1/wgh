@@ -37,6 +37,8 @@ type State struct {
 	ExitNode   string   `json:"exit_node,omitempty"`
 	NoRoutes   bool     `json:"no_accept_routes,omitempty"`
 	NoDNS      bool     `json:"no_dns,omitempty"` // don't run the built-in DNS server
+	// NoPortMap: don't ask the router to forward the port.
+	NoPortMap bool `json:"no_portmap,omitempty"`
 }
 
 // ErrNotJoined means there is no agent state yet.
