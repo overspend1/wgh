@@ -24,7 +24,8 @@ type dnsState struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	configured bool
-	failed     bool // gave up: names come from the hosts file only
+	file       string // resolver directory used instead of resolved (macOS)
+	failed     bool   // gave up: names come from the hosts file only
 }
 
 func (a *Agent) dnsRun() wgctl.Runner {
@@ -102,6 +103,30 @@ func (a *Agent) startDNSLocked(domain string, records map[string][]netip.Addr) b
 	if a.o.DNSAvailable != nil {
 		available = a.o.DNSAvailable
 	}
+	if dir := a.o.ResolverDir; dir != "" {
+		// macOS: a per-domain resolver file instead of systemd-resolved.
+		bound, err := srv.Listen(addr)
+		if err != nil {
+			a.o.Logf("dns: listen on %s: %v; names come from the hosts file only", addr, err)
+			return false
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = srv.Serve(ctx, bound)
+		}()
+		if err := meshdns.WriteResolverFile(dir, srv.Domain(), bound.Addr()); err != nil {
+			cancel()
+			<-done
+			a.o.Logf("dns: %v; names come from the hosts file only", err)
+			return false
+		}
+		a.dns = dnsState{srv: srv, cancel: cancel, done: done, configured: true, file: dir}
+		a.setDNSOn(true)
+		a.o.Logf("dns: answering *.%s on %s through %s", srv.Domain(), bound, dir)
+		return true
+	}
 	if !available(run) {
 		a.o.Logf("dns: systemd-resolved is not running or resolvectl is missing; names come from the hosts file only")
 		return false
@@ -130,7 +155,11 @@ func (a *Agent) startDNSLocked(domain string, records map[string][]netip.Addr) b
 }
 
 func (a *Agent) stopDNSLocked() {
-	if a.dns.configured {
+	if a.dns.configured && a.dns.file != "" {
+		if err := meshdns.RemoveResolverFile(a.dns.file, a.dns.srv.Domain()); err != nil {
+			a.o.Logf("dns: %v", err)
+		}
+	} else if a.dns.configured {
 		a.mu.Lock()
 		ifName := a.st.Interface
 		a.mu.Unlock()

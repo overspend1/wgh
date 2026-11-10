@@ -16,6 +16,7 @@ import (
 
 	"github.com/overspend1/wgh/internal/keys"
 	"github.com/overspend1/wgh/internal/mesh"
+	"github.com/overspend1/wgh/internal/meshdns"
 	"github.com/overspend1/wgh/internal/wgctl"
 )
 
@@ -131,6 +132,10 @@ type Options struct {
 	// DNS test hooks.
 	DNSAddr      netip.AddrPort          // listen here instead of <mesh address>:53
 	DNSAvailable func(wgctl.Runner) bool // nil means meshdns.Available
+	// ResolverDir, when set, points the system at the DNS server with a
+	// per-domain file there instead of systemd-resolved. It defaults to
+	// /etc/resolver on macOS.
+	ResolverDir string
 }
 
 type path struct {
@@ -182,6 +187,9 @@ func New(o Options) (*Agent, error) {
 	}
 	if o.PollWait == 0 {
 		o.PollWait = 25 * time.Second
+	}
+	if o.ResolverDir == "" && runtime.GOOS == "darwin" && !o.DryRun {
+		o.ResolverDir = meshdns.ResolverDir
 	}
 	if o.Heartbeat == 0 {
 		o.Heartbeat = 20 * time.Second

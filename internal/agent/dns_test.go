@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -261,5 +262,31 @@ func TestMeshDNSDryRun(t *testing.T) {
 		if logs.count(want) != 1 {
 			t.Errorf("dry run did not print %q", want)
 		}
+	}
+}
+
+func TestMeshDNSResolverFile(t *testing.T) {
+	r := newRig(t)
+	dirs := map[string]string{"laptop": filepath.Join(t.TempDir(), "resolver")}
+	r.opts = func(name string, o *Options) {
+		o.DNS = true
+		o.ResolverDir = dirs[name]
+		o.DNSAddr = netip.MustParseAddrPort("127.0.0.1:0")
+		o.DNSRun = func([]byte, string, ...string) ([]byte, error) {
+			t.Error("resolvectl must not run in resolver-file mode")
+			return nil, nil
+		}
+	}
+	a := r.join("laptop", "192.168.1.10", nil, false)
+	file := filepath.Join(dirs["laptop"], "wgh")
+	eventually(t, "resolver file", func() bool {
+		b, _ := os.ReadFile(file)
+		return strings.Contains(string(b), "nameserver 127.0.0.1")
+	})
+	a.a.Stop()
+	err := <-a.done
+	a.done <- err
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Error("resolver file left behind")
 	}
 }
