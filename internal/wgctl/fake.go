@@ -52,6 +52,10 @@ type Fake struct {
 	exit    bool
 	forward bool
 	hs      map[string]time.Time
+
+	filterOn    bool
+	filterScope FilterScope
+	filter      []FilterRule
 }
 
 // NewFake returns a fake backend, optionally attached to a network.
@@ -261,6 +265,7 @@ func (f *Fake) SetForward(name, subnet string, on bool) error {
 func (f *Fake) Down(name string) error {
 	f.mu.Lock()
 	f.ifc, f.peers, f.routes, f.exit, f.forward = nil, nil, nil, false, false
+	f.filterOn, f.filter = false, nil
 	f.mu.Unlock()
 	f.logf("[dry-run] remove %s", name)
 	return nil
@@ -274,6 +279,10 @@ type Snapshot struct {
 	Routes  []string
 	Exit    bool
 	Forward bool
+	// Filter is set when an access filter is on; FilterRules may be empty.
+	Filter      bool
+	FilterScope FilterScope
+	FilterRules []FilterRule
 }
 
 // Snapshot returns the current configuration.
@@ -281,7 +290,8 @@ func (f *Fake) Snapshot() Snapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s := Snapshot{Up: f.ifc != nil, Peers: append([]Peer(nil), f.peers...),
-		Routes: append([]string(nil), f.routes...), Exit: f.exit, Forward: f.forward}
+		Routes: append([]string(nil), f.routes...), Exit: f.exit, Forward: f.forward,
+		Filter: f.filterOn, FilterScope: f.filterScope, FilterRules: append([]FilterRule(nil), f.filter...)}
 	if f.ifc != nil {
 		s.Address = f.ifc.Address
 	}

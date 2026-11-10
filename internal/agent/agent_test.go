@@ -149,6 +149,9 @@ func TestMeshEndToEnd(t *testing.T) {
 	if snap.Address.String() != "10.144.0.2/16" {
 		t.Errorf("laptop address = %s", snap.Address)
 	}
+	if snap.Filter || b.fake.Snapshot().Filter {
+		t.Error("a mesh without acl.json got an access filter")
+	}
 
 	// Names land in the hosts file, next to what was there.
 	eventually(t, "hosts file", func() bool {
