@@ -1,0 +1,6 @@
+/wgh
+/wgh-*
+/dist/
+*.png
+state.json
+wg-out/

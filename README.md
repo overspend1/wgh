@@ -1,0 +1,206 @@
+# wgh
+
+A small WireGuard helper for a home network. It creates the server and its
+peers, allocates tunnel addresses, generates keys, writes `wg-quick` configs
+and shows client configs as QR codes for the phone apps.
+
+It only ever writes files. It never touches a network interface, never calls
+`wg` or `ip`, and never needs root. You copy the server config to the box that
+runs WireGuard (an OpenWrt router, a Proxmox LXC, any Linux host) yourself.
+
+- Single static Go binary, two small dependencies
+  (`golang.org/x/crypto/curve25519` for keys, `skip2/go-qrcode` for QR codes).
+- Keys are generated natively (Curve25519, clamped exactly like `wg genkey`).
+- State lives in one JSON file, mode `0600`, in a `0700` directory.
+- Every exported config and QR PNG is also written `0600`, atomically.
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/overspend1/wgh/main/install.sh | sh
+```
+
+The script detects your OS and CPU, downloads the matching binary from this
+repo's GitHub releases, checks it against `checksums.txt`, and installs it to
+`/usr/local/bin` if you can write there, otherwise `~/.local/bin`. It never
+uses sudo. On OpenWrt without curl, use `wget -qO- <same URL> | sh`.
+
+Options: `WGH_VERSION=v0.1.0` pins a release, `WGH_INSTALL_DIR=/opt/bin`
+picks the directory, `WGH_ARCH=linux-mipsle` skips detection.
+
+Release binaries: `linux-amd64`, `linux-arm64`, `linux-armv7`, `linux-armv6`,
+`linux-mips`, `linux-mipsle` (softfloat, for OpenWrt), `darwin-amd64`,
+`darwin-arm64`. Or install from source:
+
+```sh
+go install github.com/overspend1/wgh/cmd/wgh@latest
+```
+
+## Build
+
+```sh
+go build -o wgh ./cmd/wgh
+```
+
+All release binaries at once, into `dist/` with checksums:
+
+```sh
+sh scripts/build-release.sh v0.1.0
+```
+
+A fully static, stripped binary (works on any Linux, including Alpine-based
+containers):
+
+```sh
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=0.1.0" -o wgh ./cmd/wgh
+```
+
+Cross-compile for a router, for example a MIPS or ARM OpenWrt box:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o wgh-arm64 ./cmd/wgh
+CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o wgh-mipsle ./cmd/wgh
+```
+
+Run the tests:
+
+```sh
+go test ./...
+```
+
+## Quick start
+
+```sh
+# 1. Create the server: a dynamic DNS name or public IP, plus the LAN
+#    interface to NAT out of if you want full-tunnel clients to reach the internet.
+wgh init --endpoint vpn.example.com --dns 192.168.1.53 --nat-iface eth0
+
+# 2. Add peers. Each gets the next free address and its own preshared key.
+wgh add phone --qr                       # prints the QR straight away
+wgh add laptop --allowed-ips 10.8.0.0/24,192.168.1.0/24   # split tunnel
+wgh add pve1 --ip 10.8.0.50 --keepalive 0
+
+# 3. Write everything out.
+wgh export --dir ./wg-out --qr
+#   ./wg-out/wg0.conf            -> /etc/wireguard/wg0.conf on the server
+#   ./wg-out/peers/phone.conf    -> import on the client
+#   ./wg-out/peers/phone.png     -> scan with the WireGuard app
+
+# 4. On the server (wgh does not do this for you):
+#    sudo install -m 600 wg-out/wg0.conf /etc/wireguard/wg0.conf
+#    sudo systemctl enable --now wg-quick@wg0
+#    and forward UDP 51820 on your router to that host.
+```
+
+After adding or removing a peer, export again and reload the server
+(`sudo systemctl restart wg-quick@wg0`, or `wg syncconf wg0 <(wg-quick strip wg0)`
+to apply without dropping existing sessions).
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `wgh init` | Create the server keys and settings. Refuses to overwrite unless `--force`. |
+| `wgh add <name>` | Add a peer with the next free address. |
+| `wgh list` | Show the server line and a table of peers. |
+| `wgh remove <name>` | Delete a peer. Its address becomes free again. |
+| `wgh show <name> [-o file]` | Print a peer's client config, or write it (mode 0600). |
+| `wgh qr <name> [--png file]` | Print the client config as a terminal QR code; optionally save a PNG. |
+| `wgh server` | Print the server config. |
+| `wgh export --dir DIR [--qr]` | Write `DIR/<interface>.conf` and `DIR/peers/<name>.conf` (and PNGs). |
+| `wgh version` | Print the version. |
+
+Flags can go before or after the peer name. `wgh <command> -h` lists them.
+
+### `init` flags
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--endpoint` | (required) | Host or IP clients dial. `host:port` overrides the port in client configs only (useful behind a port forward). IPv6 literals are bracketed for you. |
+| `--subnet` | `10.8.0.0/24` | IPv4 tunnel subnet, `/30` or larger. |
+| `--port` | `51820` | UDP listen port. |
+| `--interface` | `wg0` | Used for the server config's file name. |
+| `--address` | first host | Server's tunnel address, `10.8.0.1` by default. |
+| `--dns` | none | DNS for clients, e.g. a Pi-hole. Peers can override. |
+| `--nat-iface` | none | Adds iptables forward and MASQUERADE rules to `PostUp`/`PostDown`. Leave it out on OpenWrt, where the firewall zone does this. |
+| `--mtu` | unset | Written to both server and client configs. |
+| `--force` | false | Replace an existing state file. This throws away every key in it. |
+
+### `add` flags
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--ip` | next free | Pick an address yourself. Must be free and inside the subnet. |
+| `--psk` | `true` | Preshared key per peer (extra symmetric layer). `--psk=false` to skip. |
+| `--allowed-ips` | `0.0.0.0/0, ::/0` | Full tunnel by default. Use your tunnel and LAN subnets for split tunnel. |
+| `--dns` | server's | Per-peer DNS override. |
+| `--keepalive` | `25` | Keeps NAT mappings alive for phones. `0` disables. |
+| `--qr` | false | Print the QR code right after adding. |
+
+## State file
+
+Default path, in order: `--state PATH`, `$WGH_STATE`,
+`$XDG_CONFIG_HOME/wgh/state.json` (usually `~/.config/wgh/state.json`).
+
+It holds every private key in plain JSON, so treat it like an SSH key: keep it
+`0600` (wgh does), back it up somewhere encrypted, and do not commit it. Keep a
+separate state file per site with `--state` or `WGH_STATE`.
+
+```json
+{
+  "version": 1,
+  "server": {
+    "interface": "wg0",
+    "subnet": "10.8.0.0/24",
+    "address": "10.8.0.1",
+    "listen_port": 51820,
+    "endpoint": "vpn.example.com",
+    "private_key": "...",
+    "public_key": "...",
+    "dns": ["192.168.1.53"]
+  },
+  "peers": [
+    {
+      "name": "phone",
+      "address": "10.8.0.2",
+      "private_key": "...",
+      "public_key": "...",
+      "preshared_key": "...",
+      "allowed_ips": ["0.0.0.0/0", "::/0"],
+      "persistent_keepalive": 25,
+      "created_at": "2026-11-10T10:00:00Z"
+    }
+  ]
+}
+```
+
+## Address allocation
+
+The server takes the first host address (`.1`). Each new peer gets the lowest
+free host address, so a removed peer's address is reused first. The network and
+broadcast addresses are never handed out. A `/24` holds the server plus 253
+peers; adding past that fails with a clear error.
+
+## Limits and choices
+
+- IPv4 tunnel subnet only. Clients can still route `::/0` through it.
+- No locking: do not run two `wgh` commands against the same state file at once.
+- Client private keys are generated here, not on the device. That is what makes
+  the one-scan QR flow work; if you would rather a device keep its own key,
+  that is a small addition (an `--pubkey` flag on `add`).
+- QR codes contain the client's private key. Do not screenshot or share them.
+- If a phone cannot read the terminal QR, try `wgh qr <name> --invert`, or use
+  the PNG.
+
+## Layout
+
+```
+cmd/wgh/            CLI and end-to-end test
+scripts/            release build script
+install.sh          one-line installer
+.github/workflows/  tests on push, release builds on v* tags
+internal/keys/      key generation (tested against RFC 7748 vectors)
+internal/ipam/      address allocation
+internal/state/     JSON state, 0600 atomic writes
+internal/render/    server and client .conf rendering
+```
