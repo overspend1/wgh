@@ -114,6 +114,11 @@ type Options struct {
 	DryRun    bool
 	Logf      func(format string, a ...any)
 	Now       func() time.Time
+	// DNS serves device names on the mesh address, port 53, and points
+	// systemd-resolved at it for the mesh domain. The hosts file is still
+	// written, so names work either way.
+	DNS    bool
+	DNSRun wgctl.Runner // runs resolvectl; nil means wgctl.ExecRunner
 	// Test hooks.
 	HTTP       func(c *Client)
 	PollWait   time.Duration
@@ -121,6 +126,10 @@ type Options struct {
 	Tick       time.Duration
 	LocalAddrs func() []netip.Addr
 	NoSocket   bool
+
+	// DNS test hooks.
+	DNSAddr      netip.AddrPort          // listen here instead of <mesh address>:53
+	DNSAvailable func(wgctl.Runner) bool // nil means meshdns.Available
 }
 
 type path struct {
@@ -150,6 +159,10 @@ type Agent struct {
 	upKey     string
 	wake      chan struct{}
 	stop      context.CancelFunc
+	dnsOn     bool
+
+	dnsMu sync.Mutex
+	dns   dnsState
 }
 
 // New loads the device state and prepares an agent.
@@ -261,6 +274,7 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) teardown() {
+	a.stopDNS()
 	if a.o.HostsPath != "" {
 		if err := WriteHosts(a.o.HostsPath, nil, ""); err != nil {
 			a.o.Logf("hosts file: %v", err)
@@ -466,6 +480,7 @@ func (a *Agent) reconcile() error {
 	if a.o.HostsPath != "" {
 		errs = append(errs, WriteHosts(a.o.HostsPath, hosts, nm.Domain))
 	}
+	a.syncDNS(nm.Domain, hosts)
 	return errors.Join(errs...)
 }
 

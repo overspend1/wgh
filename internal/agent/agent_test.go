@@ -50,6 +50,7 @@ type rig struct {
 	relay  *wgctl.Fake
 	dir    string
 	cancel context.CancelFunc
+	opts   func(name string, o *Options) // changes each device's options before it starts
 }
 
 func newRig(t *testing.T) *rig {
@@ -94,9 +95,13 @@ func (r *rig) join(name, ip string, routes []string, exit bool) *dev {
 	os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0o644)
 	addr := netip.MustParseAddr(ip)
 	fake := wgctl.NewFake(nil, r.net, ip+":41820")
-	a, err := New(Options{StatePath: path, Backend: fake, HostsPath: hosts, Now: r.clk.Now,
+	o := Options{StatePath: path, Backend: fake, HostsPath: hosts, Now: r.clk.Now,
 		PollWait: time.Second, Heartbeat: 30 * time.Millisecond, Tick: 20 * time.Millisecond,
-		LocalAddrs: func() []netip.Addr { return []netip.Addr{addr} }, NoSocket: true})
+		LocalAddrs: func() []netip.Addr { return []netip.Addr{addr} }, NoSocket: true}
+	if r.opts != nil {
+		r.opts(name, &o)
+	}
+	a, err := New(o)
 	if err != nil {
 		r.t.Fatal(err)
 	}

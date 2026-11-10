@@ -131,6 +131,7 @@ func cmdUp(args []string, stdout, stderr io.Writer) error {
 	advExit := fs.String("advertise-exit", "", "offer this device as an exit node: true or false")
 	acceptRoutes := fs.String("accept-routes", "", "use routes other devices share: true or false (default true)")
 	hostsPath := fs.String("hosts", "/etc/hosts", "hosts file for device names (\"\" to leave it alone)")
+	dnsFlag := fs.String("dns", "", "serve device names with a built-in DNS server through systemd-resolved: true or false (default true)")
 	if err := noPositional(fs, args); err != nil {
 		return err
 	}
@@ -158,6 +159,11 @@ func cmdUp(args []string, stdout, stderr io.Writer) error {
 		return err
 	} else if ok {
 		st.NoRoutes, changed = !v, true
+	}
+	if v, ok, err := optBool(*dnsFlag, "--dns"); err != nil {
+		return err
+	} else if ok {
+		st.NoDNS, changed = !v, true
 	}
 	var backend wgctl.Backend
 	hosts := *hostsPath
@@ -188,8 +194,10 @@ func cmdUp(args []string, stdout, stderr io.Writer) error {
 		}
 		*statePath = p
 	}
+	// In a dry run the agent prints what DNS would do instead of listening on
+	// port 53 or running resolvectl.
 	a, err := agent.New(agent.Options{StatePath: *statePath, Backend: backend, HostsPath: hosts, Version: version,
-		DryRun: *dry, Logf: logger(stdout)})
+		DryRun: *dry, Logf: logger(stdout), DNS: !st.NoDNS})
 	if err != nil {
 		return err
 	}
@@ -257,6 +265,9 @@ func printStatus(w io.Writer, s agent.Status) {
 		}
 	}
 	fmt.Fprintf(w, "%s  %s  %s\n", s.Name, s.Address, conn)
+	if s.DNS != "" {
+		fmt.Fprintf(w, "dns %s\n", s.DNS)
+	}
 	if s.ExitNode != "" {
 		state := "on"
 		if !s.ExitActive {

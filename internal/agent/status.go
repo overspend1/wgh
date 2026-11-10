@@ -61,6 +61,7 @@ type Status struct {
 	PendingRoutes []string     `json:"pending_routes,omitempty"`
 	PendingExit   bool         `json:"pending_exit,omitempty"`
 	DryRun        bool         `json:"dry_run,omitempty"`
+	DNS           string       `json:"dns,omitempty"` // DNSOn, DNSHostsOnly or DNSOff
 	Version       string       `json:"version"`
 	Peers         []PeerStatus `json:"peers"`
 	At            time.Time    `json:"at"`
@@ -73,7 +74,8 @@ func (a *Agent) Status() Status {
 	s := Status{Name: a.st.Name, Address: a.st.Address, Subnet: a.st.Subnet, Interface: a.st.Interface,
 		ListenPort: a.st.ListenPort, URL: a.st.URL, Connected: a.connected, LastError: a.lastErr,
 		ExitNode: a.st.ExitNode, ExitActive: a.exitOn, ExitNote: a.exitNote, Routes: a.st.Routes,
-		AdvertiseExit: a.st.Exit, DryRun: a.o.DryRun, Version: a.o.Version, At: a.o.Now()}
+		AdvertiseExit: a.st.Exit, DryRun: a.o.DryRun, Version: a.o.Version, At: a.o.Now(),
+		DNS: a.dnsModeLocked()}
 	if a.nm == nil {
 		return s
 	}
