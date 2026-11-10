@@ -1,0 +1,15 @@
+# The mesh coordinator and relay. Edit --endpoint, then:
+#   sudo install -m 644 wgh-serve.service /etc/systemd/system/
+#   sudo systemctl enable --now wgh-serve
+[Unit]
+Description=wgh mesh coordinator and relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/wgh serve --endpoint vpn.example.com
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

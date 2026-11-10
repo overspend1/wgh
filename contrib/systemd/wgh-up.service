@@ -1,0 +1,16 @@
+# Keeps this device connected to the mesh. Run 'sudo wgh join <token>' once
+# first, then:
+#   sudo install -m 644 wgh-up.service /etc/systemd/system/
+#   sudo systemctl enable --now wgh-up
+[Unit]
+Description=wgh mesh device
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/wgh up
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

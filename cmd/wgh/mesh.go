@@ -125,8 +125,9 @@ func cmdJoin(args []string, stdout, stderr io.Writer) error {
 func cmdUp(args []string, stdout, stderr io.Writer) error {
 	fs, statePath := agentFlags("up", stderr)
 	dry := fs.Bool("dry-run", false, "don't touch any interface or file: print what would be done")
-	exitNode := fs.String("exit-node", "\x00", "send internet traffic through this device (\"\" turns it off)")
-	routes := fs.String("advertise-routes", "\x00", "comma-separated LAN ranges to share (\"\" stops)")
+	var exitNode, routes optString
+	fs.Var(&exitNode, "exit-node", "send internet traffic through this device (\"\" turns it off)")
+	fs.Var(&routes, "advertise-routes", "comma-separated LAN ranges to share (\"\" stops)")
 	advExit := fs.String("advertise-exit", "", "offer this device as an exit node: true or false")
 	acceptRoutes := fs.String("accept-routes", "", "use routes other devices share: true or false (default true)")
 	hostsPath := fs.String("hosts", "/etc/hosts", "hosts file for device names (\"\" to leave it alone)")
@@ -138,11 +139,11 @@ func cmdUp(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	changed := false
-	if *exitNode != "\x00" {
-		st.ExitNode, changed = *exitNode, true
+	if exitNode.set {
+		st.ExitNode, changed = exitNode.v, true
 	}
-	if *routes != "\x00" {
-		r := render.SplitList(*routes)
+	if routes.set {
+		r := render.SplitList(routes.v)
 		if err := mesh.ValidRoutes(r); err != nil {
 			return err
 		}
@@ -475,3 +476,13 @@ func orDash(s string) string {
 	}
 	return s
 }
+
+// optString is a string flag that remembers whether it was given, so an
+// explicit empty value can mean "turn it off".
+type optString struct {
+	v   string
+	set bool
+}
+
+func (o *optString) String() string     { return o.v }
+func (o *optString) Set(v string) error { o.v, o.set = v, true; return nil }

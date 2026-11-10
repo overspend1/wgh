@@ -1,18 +1,22 @@
 # wgh
 
-A small WireGuard helper for a home network. Run `wgh` and you get a
-full-screen interface, in WireGuard red, that sets up the server, adds and
-removes peers, shows their configs and puts a QR code on screen for the phone
-apps. Every action is also a plain subcommand for scripts.
+Your own WireGuard mesh, in one small binary. It does the job Tailscale does
+for a home lab, without an account or anyone's cloud: one machine you own runs
+the coordinator, every other device joins with a one-time token, and from then
+on wgh writes and updates the WireGuard config by itself. Devices talk to each
+other directly when they can and through your own relay when they can't.
 
-It only ever writes files. It never touches a network interface, never calls
-`wg` or `ip`, and never needs root. You copy the server config to the box that
-runs WireGuard (an OpenWrt router, a Proxmox LXC, any Linux host) yourself.
+Run `wgh` and you get a full-screen interface, in WireGuard red, that shows
+every device with its path, endpoint, last handshake and traffic.
 
-- Single static Go binary.
-- Keys are generated natively (Curve25519, clamped exactly like `wg genkey`).
-- State lives in one JSON file, mode `0600`, in a `0700` directory.
-- Every exported config and QR PNG is also written `0600`, atomically.
+wgh also still does what it started as: a **simple server** mode that only
+writes WireGuard config files and QR codes for one classic server, never
+touching the network and never needing root. See [Simple server](#simple-server).
+
+- Single static Go binary. No other daemons, no database.
+- Each device makes its own key and never sends the private half anywhere.
+- Devices find each other by name: `ssh pve1` or `ssh pve1.wgh`.
+- Exit node, shared LAN routes, key rotation, removal, phones by QR code.
 - `wgh update` replaces itself with the latest release, checksum-verified.
 
 ## Install
@@ -37,67 +41,192 @@ Release binaries: `linux-amd64`, `linux-arm64`, `linux-armv7`, `linux-armv6`,
 go install github.com/overspend1/wgh/cmd/wgh@latest
 ```
 
-## Build
+## Mesh
+
+### What you need
+
+- **Root.** `wgh serve` and `wgh up` create a WireGuard interface, set routes
+  and, for an exit node, firewall rules. Both refuse to run without root and
+  say so. Nothing else in wgh needs root.
+- **Linux** on the coordinator and on every device that runs `wgh up`, with
+  `wireguard-tools` (the `wg` command) and `iproute2` (`ip`). The kernel
+  WireGuard module is used when it is there (any kernel from 5.6, and most
+  older distribution kernels); otherwise wgh starts `wireguard-go` if it is
+  installed. An exit node or relay also needs `iptables`.
+- **Phones, tablets and other OSes** join as plain WireGuard peers through the
+  relay, using the official WireGuard app (see [Phones](#phones)).
+- One machine every device can reach for the coordinator: a small VPS, or a
+  box at home with two ports forwarded.
+
+Ports:
+
+| Where | Port | What |
+| --- | --- | --- |
+| coordinator | TCP 8443 | device API (HTTPS) |
+| coordinator | UDP 51820 | relay |
+| each device | UDP 41820 | direct connections (forwarding it helps but is optional) |
+
+### Quick start
+
+On the coordinator:
 
 ```sh
-go build -o wgh ./cmd/wgh
+sudo wgh serve --endpoint vpn.example.com    # leave it running, or use the systemd unit
+sudo wgh admin token                         # prints: sudo wgh join wgh1_...
 ```
 
-All release binaries at once, into `dist/` with checksums:
+On each device:
 
 ```sh
-sh scripts/build-release.sh v0.1.0
+sudo wgh join wgh1_...       # once; picks its name from the hostname, or --name
+sudo wgh up                  # connects and keeps the config up to date
+wgh status                   # devices, paths, handshakes, traffic
 ```
 
-A fully static, stripped binary (works on any Linux, including Alpine-based
-containers):
+That is all the configuration there is. When a device joins, leaves, moves to
+another network or gets a new key, every other device picks it up within a
+second or two.
+
+Try it without touching anything: `wgh serve --dry-run ...` and
+`wgh up --dry-run` print every `ip`, `wg` and `iptables` command they would run
+instead of running it, and skip the hosts file.
+
+### Run it with systemd
+
+[`contrib/systemd`](contrib/systemd) has a unit for each side:
 
 ```sh
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=0.1.0" -o wgh ./cmd/wgh
+sudo install -m 644 contrib/systemd/wgh-serve.service /etc/systemd/system/   # coordinator; edit --endpoint first
+sudo install -m 644 contrib/systemd/wgh-up.service /etc/systemd/system/      # devices, after 'wgh join'
+sudo systemctl enable --now wgh-serve    # or wgh-up
 ```
 
-Cross-compile for a router, for example a MIPS or ARM OpenWrt box:
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `wgh serve --endpoint HOST` | Run the coordinator and relay. `--exit` offers the relay as an exit node. |
+| `wgh admin token [--ttl 1h] [--reusable] [--approve]` | Make a join token. One use and one hour by default; `--approve` pre-approves the routes the device shares. |
+| `wgh admin devices` | Every device, online or not, and what waits for approval. |
+| `wgh admin approve <name>` | Approve the routes or exit node a device offers. |
+| `wgh admin remove <name>` | Remove a device. Its key stops working at once. |
+| `wgh admin phone <name> [--exit]` | Add a phone and print its QR code. `wgh admin qr <name>` shows it again. |
+| `wgh join <token>` | Join this device. Flags: `--name`, `--advertise-routes`, `--advertise-exit`. |
+| `wgh up` | Connect and stay connected. Flags below. |
+| `wgh down` | Stop a running `wgh up`; the interface goes away. |
+| `wgh status` | This device and every peer: path, endpoint, handshake, traffic. |
+| `wgh exit <name>` / `wgh exit off` | Send internet traffic through a device, or stop. |
+| `wgh rotate` | Switch this device to a new WireGuard key. |
+| `wgh leave` | Leave the mesh and delete this device's key. |
+
+`wgh up` flags, each remembered for next time:
+
+| Flag | Meaning |
+| --- | --- |
+| `--exit-node NAME` | use that device for internet traffic (`""` turns it off) |
+| `--advertise-routes 192.168.1.0/24` | share these LAN ranges (needs approval on the coordinator) |
+| `--advertise-exit=true` | offer this device as an exit node (needs approval) |
+| `--accept-routes=false` | ignore routes other devices share |
+| `--hosts ""` | leave `/etc/hosts` alone |
+| `--dry-run` | print what would be done, change nothing |
+
+### How it works
+
+- **Coordinator.** `wgh serve` keeps the device list, addresses and public keys
+  in one `0600` file. Devices hold a long poll open to it, so changes reach them
+  at once. The coordinator never sees a device's private key.
+- **Pinned TLS.** The coordinator makes its own certificate. The join token
+  carries a fingerprint of it, so a device only ever talks to your coordinator,
+  with no certificate authority involved. Behind a reverse proxy that already
+  does TLS, run `wgh serve --plain-http --url https://your.proxy` and devices
+  check the proxy's normal certificate instead.
+- **Direct first.** Every device tries every other one directly: the public
+  address the relay saw it come from (that is the STUN-style part), its listen
+  port on that address, and its LAN addresses, LAN first when two devices sit
+  behind the same router. Whatever answers is used.
+- **Relay when it has to.** Until a direct path answers, traffic goes through
+  the relay on the coordinator. When a direct path appears, traffic moves onto
+  it within seconds; if it breaks, it falls back.
+- **Names.** wgh keeps a marked block in `/etc/hosts` with every device as
+  `name` and `name.wgh`, and removes it on `wgh down`.
+- **Exit node.** Internet traffic goes through the chosen device with policy
+  routing (the same trick `wg-quick` uses), and the connection to the
+  coordinator stays outside the tunnel. A device used as exit node needs a
+  direct path; the relay itself can be the exit node with `wgh serve --exit`.
+- **Shared routes.** A device can share its LAN (`--advertise-routes`). Once the
+  coordinator approves, every other device can reach that LAN through it.
+- **Removal and rotation.** Removing a device drops it from everyone at once.
+  `wgh rotate` makes a new key on the device and switches over without
+  rejoining.
+
+Addresses come from `10.144.0.0/16` by default (`wgh serve --subnet` on first
+start), picked so it does not clash with Tailscale's `100.64.0.0/10` if you
+run both while you move over.
+
+### Phones
 
 ```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o wgh-arm64 ./cmd/wgh
-CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o wgh-mipsle ./cmd/wgh
+sudo wgh admin phone pixel          # add --exit to send all its traffic through the relay
 ```
 
-Run the tests:
+Scan the QR code with the WireGuard app. The phone reaches every device
+through the relay. Its key is made on the coordinator, because a phone cannot
+run `wgh`, so the QR code holds a private key: do not screenshot or share it.
 
-```sh
-go test ./...
-```
+### Security notes
+
+- A join token is a password for your mesh until it is used or expires. Send it
+  privately. Tokens are one use and one hour unless you ask otherwise, and only
+  their hash is stored.
+- The admin commands talk to the coordinator over a unix socket that only root
+  can open. There is no web admin page to expose.
+- Traffic through the relay is decrypted and re-encrypted on the coordinator,
+  because the relay is a WireGuard peer of both sides. Direct traffic is end to
+  end. If you do not trust the machine that runs the relay, that matters (unlike
+  Tailscale's relays, which only pass encrypted packets along).
+- Device state lives in `/var/lib/wgh/agent.json` (mode `0600`, root's), and the
+  coordinator's in `/var/lib/wgh/coordinator/`. Back up the coordinator
+  directory; losing it means every device has to join again.
+
+### Not done yet
+
+The core works; these are not there yet:
+
+- Devices behind two strict (symmetric) NATs never get a direct path and stay
+  on the relay. No port prediction or birthday tricks yet.
+- IPv4 only, inside the mesh and for endpoints.
+- `wgh up` runs on Linux only. macOS and Windows join as phones for now.
+- Names come from the hosts file, not a DNS server, so other machines on your
+  LAN cannot look them up.
+- No access rules: every device can reach every other one.
+- A device that is itself only reachable through the relay cannot be an exit
+  node yet.
+- Not tested on a real kernel by the automated tests, which run against a fake
+  WireGuard backend. Tested by hand with `--dry-run`.
 
 ## The interface
 
 ```sh
-wgh                      # opens the TUI (uses ~/.config/wgh/state.json)
-wgh --state ./home.json  # another site
+sudo wgh                 # opens the TUI
+wgh --state ./home.json  # the simple server for another site
 ```
 
-With no state file yet, it opens a setup form: endpoint, subnet, port,
-interface, DNS and NAT interface. Leave a field blank to take the default shown
-in grey. After that you land on the peer list.
+It shows tabs for what this machine runs:
 
-| Key | Action |
-| --- | --- |
-| `a` | add a peer; its QR code opens straight away |
-| `d` | remove the selected peer (asks first) |
-| `enter` | show the selected peer's client config |
-| `r` | show the selected peer's QR code |
-| `s` | show the server config |
-| `e` | export the server and all client configs to a directory |
-| `?` | help |
-| `q`, `esc` | back, or quit from the list |
+- **Devices** (after `wgh join`): every device with its path (direct, relay or
+  offline), endpoint, last handshake and traffic. `x` uses the selected device
+  as exit node, `X` turns that off, `R` switches to a new key.
+- **Admin** (on the coordinator): every device, last seen, and what waits for
+  approval. `t` makes a join token, `p` adds a phone and shows its QR code, `a`
+  approves, `d` removes.
+- **Simple server** (when there is a simple-server state file).
+- **Start** when none of these exist yet: join a mesh by pasting a token, read
+  how to run a coordinator, or set up a simple server.
 
-In forms, `tab` and the arrow keys move between fields, `space` flips a yes/no,
-`enter` on the last field (or `ctrl+s` anywhere) submits. On the QR screen,
-`p` saves a PNG of it to the current directory.
-
-The QR code is always drawn white on black so phones can scan it whatever your
-terminal theme. It needs a window of roughly 70 by 38; if yours is smaller, the
-screen says so and you can save the PNG instead.
+`tab` or the number keys switch tabs, `?` lists the keys of the tab you are on,
+`q` quits. Anything that removes, approves or changes a key asks first. The
+interface reads the running `wgh up` and `wgh serve` over their local sockets,
+so it needs the same user they run as (usually root).
 
 On start the TUI checks GitHub once for a newer release and shows a badge if
 there is one. It never installs anything by itself. Turn the check off with
@@ -121,7 +250,43 @@ replaced with `--force`.
 If wgh lives somewhere only root can write, such as `/usr/local/bin`, run
 `sudo wgh update`, or just run the install script again.
 
-## Quick start (subcommands)
+## Simple server
+
+The original wgh: one classic WireGuard server and its peers, as config files
+and QR codes. It only ever writes files. It never touches a network interface,
+never calls `wg` or `ip`, and never needs root. You copy the server config to
+the box that runs WireGuard (an OpenWrt router, a Proxmox LXC, any Linux host)
+yourself.
+
+- Keys are generated natively (Curve25519, clamped exactly like `wg genkey`).
+- State lives in one JSON file, mode `0600`, in a `0700` directory.
+- Every exported config and QR PNG is also written `0600`, atomically.
+
+In the TUI, with no simple-server state yet, choose **Simple server** on the
+Start tab to get a setup form: endpoint, subnet, port, interface, DNS and NAT
+interface. Leave a field blank to take the default shown in grey. After that
+you land on the peer list.
+
+| Key | Action |
+| --- | --- |
+| `a` | add a peer; its QR code opens straight away |
+| `d` | remove the selected peer (asks first) |
+| `enter` | show the selected peer's client config |
+| `r` | show the selected peer's QR code |
+| `s` | show the server config |
+| `e` | export the server and all client configs to a directory |
+| `?` | help |
+| `q`, `esc` | back, or quit from the list |
+
+In forms, `tab` and the arrow keys move between fields, `space` flips a yes/no,
+`enter` on the last field (or `ctrl+s` anywhere) submits. On the QR screen,
+`p` saves a PNG of it to the current directory.
+
+The QR code is always drawn white on black so phones can scan it whatever your
+terminal theme. It needs a window of roughly 70 by 38; if yours is smaller, the
+screen says so and you can save the PNG instead.
+
+### Quick start (subcommands)
 
 ```sh
 # 1. Create the server: a dynamic DNS name or public IP, plus the LAN
@@ -149,7 +314,7 @@ After adding or removing a peer, export again and reload the server
 (`sudo systemctl restart wg-quick@wg0`, or `wg syncconf wg0 <(wg-quick strip wg0)`
 to apply without dropping existing sessions).
 
-## Commands
+### Commands
 
 | Command | What it does |
 | --- | --- |
@@ -167,7 +332,7 @@ to apply without dropping existing sessions).
 
 Flags can go before or after the peer name. `wgh <command> -h` lists them.
 
-### `init` flags
+#### `init` flags
 
 | Flag | Default | Notes |
 | --- | --- | --- |
@@ -181,7 +346,7 @@ Flags can go before or after the peer name. `wgh <command> -h` lists them.
 | `--mtu` | unset | Written to both server and client configs. |
 | `--force` | false | Replace an existing state file. This throws away every key in it. |
 
-### `add` flags
+#### `add` flags
 
 | Flag | Default | Notes |
 | --- | --- | --- |
@@ -192,7 +357,7 @@ Flags can go before or after the peer name. `wgh <command> -h` lists them.
 | `--keepalive` | `25` | Keeps NAT mappings alive for phones. `0` disables. |
 | `--qr` | false | Print the QR code right after adding. |
 
-## State file
+### State file
 
 Default path, in order: `--state PATH`, `$WGH_STATE`,
 `$XDG_CONFIG_HOME/wgh/state.json` (usually `~/.config/wgh/state.json`).
@@ -229,14 +394,14 @@ separate state file per site with `--state` or `WGH_STATE`.
 }
 ```
 
-## Address allocation
+### Address allocation
 
 The server takes the first host address (`.1`). Each new peer gets the lowest
 free host address, so a removed peer's address is reused first. The network and
 broadcast addresses are never handed out. A `/24` holds the server plus 253
 peers; adding past that fails with a clear error.
 
-## Limits and choices
+### Limits and choices
 
 - IPv4 tunnel subnet only. Clients can still route `::/0` through it.
 - No locking: do not run two `wgh` commands against the same state file at once.
@@ -247,13 +412,50 @@ peers; adding past that fails with a clear error.
 - If a phone cannot read the QR printed by `wgh qr` on a light terminal, try
   `wgh qr <name> --invert`, or use the PNG.
 
+## Build
+
+```sh
+go build -o wgh ./cmd/wgh
+```
+
+All release binaries at once, into `dist/` with checksums:
+
+```sh
+sh scripts/build-release.sh v0.1.0
+```
+
+A fully static, stripped binary (works on any Linux, including Alpine-based
+containers):
+
+```sh
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=0.1.0" -o wgh ./cmd/wgh
+```
+
+Cross-compile for a router, for example a MIPS or ARM OpenWrt box:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o wgh-arm64 ./cmd/wgh
+CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o wgh-mipsle ./cmd/wgh
+```
+
+Run the tests:
+
+```sh
+go test ./...
+```
+
 ## Layout
 
 ```
 cmd/wgh/            CLI and end-to-end test
 scripts/            release build script
+contrib/systemd/    units for 'wgh serve' and 'wgh up'
 install.sh          one-line installer
 .github/workflows/  tests on push, release builds on v* tags
+internal/mesh/      shared types, join tokens, names
+internal/coord/     the coordinator: device list, API, relay, admin socket
+internal/agent/     the device side: join, long poll, path choice, hosts file
+internal/wgctl/     drives WireGuard with ip, wg and iptables (plus a fake for tests)
 internal/keys/      key generation (tested against RFC 7748 vectors)
 internal/ipam/      address allocation
 internal/state/     JSON state, 0600 atomic writes
