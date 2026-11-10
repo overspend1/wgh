@@ -48,7 +48,8 @@ func TestACLEndToEnd(t *testing.T) {
 	if _, _, err := r.srv.Approve("pve1"); err != nil {
 		t.Fatal(err)
 	}
-	relay := r.srv.Status().Relay.Address + "/32"
+	// Every source is let in over IPv4 and over IPv6.
+	relay := r.srv.Status().Relay.Address + "/32 " + r.srv.Status().Relay.Address6 + "/128"
 
 	filter := func(d *dev, want string) {
 		t.Helper()
@@ -62,8 +63,8 @@ func TestACLEndToEnd(t *testing.T) {
 	// relay is always let in. nas may not reach pve1, so it isn't given
 	// pve1's LAN and doesn't take connections from it either.
 	filter(laptop, relay)
-	filter(pve1, relay+" 10.144.0.2/32")
-	filter(nas, relay+" 10.144.0.3/32")
+	filter(pve1, relay+" 10.144.0.2/32 fd77:6768::a90:2/128")
+	filter(nas, relay+" 10.144.0.3/32 fd77:6768::a90:3/128")
 
 	// laptop and nas have no rule either way, so they don't see each other.
 	eventually(t, "nas sees only pve1", func() bool { return meshPeers(nas) == "pve1" })

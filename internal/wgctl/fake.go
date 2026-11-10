@@ -1,6 +1,7 @@
 package wgctl
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -58,6 +59,13 @@ type Fake struct {
 	filterScope FilterScope
 	filter      []FilterRule
 	sources     []string
+
+	// NoIPv6 makes the fake behave like a host with IPv6 turned off: Up
+	// gives the interface no IPv6 address and IPv6Off says why.
+	NoIPv6   bool
+	addr6    netip.Prefix
+	v6off    error
+	forward6 bool
 }
 
 // NewFake returns a fake backend, optionally attached to a network.
@@ -76,8 +84,16 @@ func (f *Fake) Up(ifc Interface) error {
 	f.mu.Lock()
 	c := ifc
 	f.ifc = &c
+	f.addr6, f.v6off = ifc.Address6, nil
+	if f.NoIPv6 && ifc.Address6.IsValid() {
+		f.addr6, f.v6off = netip.Prefix{}, errors.New("IPv6 is disabled on this host")
+	}
+	addr6 := f.addr6
 	f.mu.Unlock()
 	f.logf("[dry-run] create %s with address %s, MTU %d", ifc.Name, ifc.Address, max(ifc.MTU, 1280))
+	if addr6.IsValid() {
+		f.logf("[dry-run] %s: IPv6 address %s", ifc.Name, addr6)
+	}
 	return nil
 }
 
@@ -263,6 +279,27 @@ func (f *Fake) SetForward(name, subnet string, on bool) error {
 	return nil
 }
 
+// SetForward6 implements Forwarder6. Like Linux, it does nothing for an
+// interface without IPv6.
+func (f *Fake) SetForward6(name, subnet6 string, on bool) error {
+	f.mu.Lock()
+	on = on && f.addr6.IsValid()
+	changed := f.forward6 != on
+	f.forward6 = on
+	f.mu.Unlock()
+	if changed {
+		f.logf("[dry-run] %s: forward and NAT IPv6 traffic from %s: %v", name, subnet6, on)
+	}
+	return nil
+}
+
+// IPv6Off implements IPv6Reporter.
+func (f *Fake) IPv6Off(string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.v6off
+}
+
 // SetBypass implements Bypasser by recording the hosts.
 func (f *Fake) SetBypass(_ string, hosts []netip.Addr) error {
 	f.mu.Lock()
@@ -276,6 +313,7 @@ func (f *Fake) Down(name string) error {
 	f.mu.Lock()
 	f.ifc, f.peers, f.routes, f.exit, f.forward, f.bypass = nil, nil, nil, false, false, nil
 	f.filterOn, f.filter = false, nil
+	f.addr6, f.v6off, f.forward6 = netip.Prefix{}, nil, false
 	f.mu.Unlock()
 	f.logf("[dry-run] remove %s", name)
 	return nil
@@ -283,13 +321,15 @@ func (f *Fake) Down(name string) error {
 
 // Snapshot is the fake's current configuration, for tests.
 type Snapshot struct {
-	Up      bool
-	Address netip.Prefix
-	Peers   []Peer
-	Routes  []string
-	Exit    bool
-	Forward bool
-	Bypass  []netip.Addr // last SetBypass
+	Up       bool
+	Address  netip.Prefix
+	Address6 netip.Prefix // zero: no IPv6 on the interface
+	Peers    []Peer
+	Routes   []string
+	Exit     bool
+	Forward  bool
+	Forward6 bool
+	Bypass   []netip.Addr // last SetBypass
 	// Filter is set when an access filter is on; FilterRules may be empty.
 	Filter      bool
 	FilterScope FilterScope
@@ -302,8 +342,8 @@ func (f *Fake) Snapshot() Snapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s := Snapshot{Up: f.ifc != nil, Peers: append([]Peer(nil), f.peers...),
-		Routes: append([]string(nil), f.routes...), Exit: f.exit, Forward: f.forward,
-		Bypass: append([]netip.Addr(nil), f.bypass...),
+		Routes: append([]string(nil), f.routes...), Exit: f.exit, Forward: f.forward, Forward6: f.forward6,
+		Address6: f.addr6, Bypass: append([]netip.Addr(nil), f.bypass...),
 		Filter: f.filterOn, FilterScope: f.filterScope, FilterRules: append([]FilterRule(nil), f.filter...),
 		Sources: append([]string(nil), f.sources...)}
 	if f.ifc != nil {

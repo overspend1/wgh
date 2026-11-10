@@ -120,7 +120,11 @@ func (a *App) devInfo() string {
 	if !s.Connected {
 		conn = "coordinator unreachable"
 	}
-	parts := []string{s.Name, s.Address, conn}
+	parts := []string{s.Name, s.Address}
+	if s.Address6 != "" {
+		parts = append(parts, s.Address6)
+	}
+	parts = append(parts, conn)
 	if s.ExitNode != "" {
 		if s.ExitActive {
 			parts = append(parts, "exit via "+s.ExitNode)

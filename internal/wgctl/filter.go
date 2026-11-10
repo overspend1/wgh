@@ -73,9 +73,56 @@ func ValidFilterRules(rules []FilterRule) error {
 // FilterChain is the iptables chain holding the filter of interface name.
 func FilterChain(name string) string { return "WGH-" + name }
 
+// ipFamily names the iptables tools of one address family.
+type ipFamily struct{ ipt, restore string }
+
+var (
+	family4 = ipFamily{"iptables", "iptables-restore"}
+	family6 = ipFamily{"ip6tables", "ip6tables-restore"}
+)
+
+// famFilter is the filter of one address family on one interface.
+type famFilter struct {
+	made  bool        // the chain exists
+	on    bool        // and the jumps into it are in place
+	scope FilterScope // of the jumps
+}
+
 type filterState struct {
 	scope FilterScope
 	rules []FilterRule
+	fam   [2]famFilter // IPv4, IPv6
+	ok    bool         // rules are in place for every family the interface has
+}
+
+// SplitFilterRules sorts rules by address family. A rule with no address
+// applies to both; one that mixes IPv4 and IPv6 can match nothing and is
+// left out.
+func SplitFilterRules(rules []FilterRule) (v4, v6 []FilterRule) {
+	v4, v6 = []FilterRule{}, []FilterRule{}
+	for _, r := range rules {
+		has4, has6 := false, false
+		for _, a := range []string{r.Src, r.Dst} {
+			if a == "" {
+				continue
+			}
+			if isIPv6(a) {
+				has6 = true
+			} else {
+				has4 = true
+			}
+		}
+		switch {
+		case has4 && has6:
+		case has6:
+			v6 = append(v6, r)
+		case has4:
+			v4 = append(v4, r)
+		default:
+			v4, v6 = append(v4, r), append(v6, r)
+		}
+	}
+	return v4, v6
 }
 
 // hooks are where the chain is jumped to from, per scope.
@@ -113,6 +160,10 @@ func FilterRestore(name string, rules []FilterRule) []byte {
 // tagged with the comment "wgh". The chain's content is replaced in full
 // with iptables-restore --noflush on every change; the jumps into it sit at
 // the top of INPUT and FORWARD (or only FORWARD, for the relay).
+//
+// When the interface has IPv6 (see Up), the same chain is kept for IPv6 with
+// ip6tables-restore, holding the IPv6 rules, so the policy can't be
+// bypassed over IPv6. The IPv4 chain holds the IPv4 rules. Each ends in DROP.
 func (l *Linux) SetFilter(name string, scope FilterScope, rules []FilterRule) error {
 	if err := ValidFilterRules(rules); err != nil {
 		return err
@@ -122,55 +173,97 @@ func (l *Linux) SetFilter(name string, scope FilterScope, rules []FilterRule) er
 	cur := l.filters[name]
 	if rules == nil {
 		if cur != nil {
-			l.filterOff(name, cur.scope)
+			l.filterOff(name, cur)
 			delete(l.filters, name)
 		}
 		return nil
 	}
-	if cur != nil && cur.scope == scope && slices.Equal(cur.rules, rules) {
+	six := l.v6[name].IsValid()
+	if cur != nil && cur.ok && cur.scope == scope && cur.fam[1].on == six && slices.Equal(cur.rules, rules) {
 		return nil
 	}
-	if _, err := l.Run(FilterRestore(name, rules), "iptables-restore", "-w", "--noflush"); err != nil {
+	st := &filterState{}
+	if cur != nil {
+		st.fam = cur.fam
+	}
+	st.scope, st.rules = scope, append([]FilterRule{}, rules...)
+	save := func() {
+		if st.fam[0].made || st.fam[1].made {
+			if l.filters == nil {
+				l.filters = map[string]*filterState{}
+			}
+			l.filters[name] = st
+		}
+	}
+	defer save()
+	r4, r6 := SplitFilterRules(rules)
+	if err := l.filterFamily(family4, &st.fam[0], name, scope, r4); err != nil {
 		return err
 	}
-	if cur != nil && cur.scope == scope {
-		cur.rules = append([]FilterRule{}, rules...)
+	if six {
+		if err := l.filterFamily(family6, &st.fam[1], name, scope, r6); err != nil {
+			return fmt.Errorf("IPv6 access filter: %w", err)
+		}
+	} else if st.fam[1].made {
+		l.familyOff(family6, &st.fam[1], name)
+	}
+	st.ok = true
+	return nil
+}
+
+// filterFamily fills the chain of one family with rules and puts the jumps
+// for scope in place, moving them when the scope changed.
+func (l *Linux) filterFamily(f ipFamily, ff *famFilter, name string, scope FilterScope, rules []FilterRule) error {
+	if _, err := l.Run(FilterRestore(name, rules), f.restore, "-w", "--noflush"); err != nil {
+		return err
+	}
+	ff.made = true
+	if ff.on && ff.scope == scope {
 		return nil // the jumps are in place
 	}
-	if cur != nil {
-		l.unhook(name, cur.scope)
+	if ff.on {
+		l.unhook(f, name, ff.scope)
+		ff.on = false
 	}
 	chain := FilterChain(name)
 	for _, h := range filterHooks(name, scope) {
 		rule := append(append([]string(nil), h[1:]...), "-j", chain, "-m", "comment", "--comment", "wgh")
 		// -C first, so a jump left by an earlier run isn't added twice.
-		if _, err := l.Run(nil, "iptables", append([]string{"-w", "-C", h[0]}, rule...)...); err == nil {
+		if _, err := l.Run(nil, f.ipt, append([]string{"-w", "-C", h[0]}, rule...)...); err == nil {
 			continue
 		}
-		if err := l.run(append([]string{"iptables", "-w", "-I", h[0], "1"}, rule...)...); err != nil {
+		if err := l.run(append([]string{f.ipt, "-w", "-I", h[0], "1"}, rule...)...); err != nil {
 			return err
 		}
 	}
-	if l.filters == nil {
-		l.filters = map[string]*filterState{}
-	}
-	l.filters[name] = &filterState{scope: scope, rules: append([]FilterRule{}, rules...)}
+	ff.on, ff.scope = true, scope
 	return nil
 }
 
-func (l *Linux) unhook(name string, scope FilterScope) {
+func (l *Linux) unhook(f ipFamily, name string, scope FilterScope) {
 	chain := FilterChain(name)
 	for _, h := range filterHooks(name, scope) {
-		args := append([]string{"iptables", "-w", "-D", h[0]}, h[1:]...)
+		args := append([]string{f.ipt, "-w", "-D", h[0]}, h[1:]...)
 		_ = l.run(append(args, "-j", chain, "-m", "comment", "--comment", "wgh")...)
 	}
 }
 
-func (l *Linux) filterOff(name string, scope FilterScope) {
-	l.unhook(name, scope)
+// familyOff removes the jumps and the chain of one family.
+func (l *Linux) familyOff(f ipFamily, ff *famFilter, name string) {
+	if ff.on {
+		l.unhook(f, name, ff.scope)
+	}
 	chain := FilterChain(name)
-	_ = l.run("iptables", "-w", "-F", chain)
-	_ = l.run("iptables", "-w", "-X", chain)
+	_ = l.run(f.ipt, "-w", "-F", chain)
+	_ = l.run(f.ipt, "-w", "-X", chain)
+	*ff = famFilter{}
+}
+
+func (l *Linux) filterOff(name string, st *filterState) {
+	l.familyOff(family4, &st.fam[0], name)
+	if st.fam[1].made {
+		l.familyOff(family6, &st.fam[1], name)
+	}
 }
 
 // SetFilter implements Filter by recording the rules.

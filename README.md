@@ -180,6 +180,19 @@ Addresses come from `10.144.0.0/16` by default (`wgh serve --subnet` on first
 start), picked so it does not clash with Tailscale's `100.64.0.0/10` if you
 run both while you move over.
 
+Every device also gets an IPv6 address in `fd77:6768::/64`, made from its
+IPv4 one (`10.144.0.5` is `fd77:6768::a90:5`), so nothing new is stored.
+Names resolve to both (`/etc/hosts` gets a second line, DNS answers AAAA),
+shared routes may be IPv6 prefixes, and an exit node takes IPv6 too (`::/0`,
+NATed out from the exit node's own address). Access rules and their filters
+cover IPv6 the same way (`ip6tables`). On a host with IPv6 turned off, `wgh
+up` logs it once and runs IPv4 only; a coordinator from before IPv6 keeps
+the mesh IPv4 only. The relay forwards IPv6 between devices only with
+`--exit`: turning on IPv6 forwarding makes Linux ignore router
+advertisements, so if the server gets its own IPv6 that way, set
+`net.ipv6.conf.<if>.accept_ra=2` first. The same goes for a Linux exit node
+or a device sharing an IPv6 route.
+
 ### Phones
 
 ```sh
@@ -247,7 +260,10 @@ The core works; these are not there yet:
   does not follow a change of Wi-Fi network until `wgh up` restarts.
 - Access rules work per device, not per port.
 - The relay carries traffic to one exit node at a time for devices without a
-  direct path to it; if several are asked for, the most used one wins.
+  direct path to it; if several are asked for, the most used one wins. That
+  path carries IPv4 only: IPv6 internet traffic is blocked, not leaked, until a
+  direct path answers. Without `--exit`, IPv6 between two devices that only
+  reach each other through the relay is dropped too; IPv4 still works.
 - Names are only answered on the mesh, so other machines on your LAN cannot
   look them up.
 - The automated tests run against a fake WireGuard backend, not a real kernel

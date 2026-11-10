@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/overspend1/wgh/internal/acl"
@@ -145,10 +146,20 @@ func (s *Server) peerViewLocked(o, viewer *device) (mesh.Node, bool) {
 	return n, true
 }
 
-// prefixes are the addresses a device answers for: its own and the LAN
-// routes it shares.
+// prefixes are the addresses a device answers for: its own, IPv4 and IPv6,
+// and the LAN routes it shares.
 func prefixes(d *device) []string {
-	return append([]string{d.Address + "/32"}, d.ApprovedRoutes...)
+	out := []string{d.Address + "/32"}
+	if a6 := mesh.Addr6(d.Address); a6 != "" {
+		out = append(out, a6+"/128")
+	}
+	return append(out, d.ApprovedRoutes...)
+}
+
+// sameFamily reports whether two prefixes are both IPv4 or both IPv6: a
+// rule from one family to the other could never match.
+func sameFamily(a, b string) bool {
+	return strings.Contains(a, ":") == strings.Contains(b, ":")
 }
 
 // relayFilterLocked is the relay's forwarding filter: for every pair the
@@ -172,6 +183,9 @@ func (s *Server) relayFilterLocked() []wgctl.FilterRule {
 			}
 			for _, src := range prefixes(a) {
 				for _, dst := range prefixes(b) {
+					if !sameFamily(src, dst) {
+						continue
+					}
 					rules = append(rules, wgctl.FilterRule{Src: src, Dst: dst})
 				}
 			}

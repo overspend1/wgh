@@ -163,6 +163,8 @@ type Agent struct {
 	applied   []wgctl.Peer
 	upDone    bool
 	upKey     string
+	upAddr6   netip.Prefix // IPv6 address the interface was last brought up with
+	v6warned  bool
 	wake      chan struct{}
 	hbWake    chan struct{} // send a heartbeat now
 	// relayExit is the exit node this device asks the relay to reach,
@@ -230,7 +232,47 @@ func (a *Agent) iface() wgctl.Interface {
 		bits = p.Bits()
 	}
 	return wgctl.Interface{Name: a.st.Interface, Address: netip.PrefixFrom(addr, bits),
-		ListenPort: a.st.ListenPort, PrivateKey: a.st.PrivateKey}
+		Address6: a.addr6Locked(), ListenPort: a.st.ListenPort, PrivateKey: a.st.PrivateKey}
+}
+
+// addr6Locked is the interface's IPv6 address from the netmap, or the zero
+// Prefix before the first netmap and with a coordinator from before IPv6,
+// which sends none: the interface is then IPv4 only, as it always was.
+func (a *Agent) addr6Locked() netip.Prefix {
+	if a.nm == nil || a.nm.Self.Address6 == "" {
+		return netip.Prefix{}
+	}
+	ip, err := netip.ParseAddr(a.nm.Self.Address6)
+	sub, serr := netip.ParsePrefix(a.nm.Subnet6)
+	if err != nil || serr != nil || !ip.Is6() || !sub.Contains(ip) {
+		return netip.Prefix{}
+	}
+	return netip.PrefixFrom(ip, sub.Bits())
+}
+
+// checkIPv6 logs, once, that the backend could not give the interface the
+// IPv6 address it was asked for. The mesh then works over IPv4 only.
+func (a *Agent) checkIPv6(ifc wgctl.Interface) {
+	if !ifc.Address6.IsValid() {
+		return
+	}
+	err := wgctl.IPv6Off(a.o.Backend, ifc.Name)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err != nil && !a.v6warned {
+		a.v6warned = true
+		a.o.Logf("IPv6 inside the mesh is off on this device: %v; the mesh works over IPv4", err)
+	}
+}
+
+// has6 reports whether any of routes is an IPv6 prefix.
+func has6(routes []string) bool {
+	for _, r := range routes {
+		if p, err := netip.ParsePrefix(r); err == nil && p.Addr().Is6() {
+			return true
+		}
+	}
+	return false
 }
 
 // Run brings the interface up and keeps it in sync until ctx ends or the
@@ -242,11 +284,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.stop = cancel
 	a.mu.Unlock()
 
-	if err := a.o.Backend.Up(a.iface()); err != nil {
+	a.mu.Lock()
+	ifc := a.iface()
+	a.mu.Unlock()
+	if err := a.o.Backend.Up(ifc); err != nil {
 		return fmt.Errorf("bring up %s: %w", a.st.Interface, err)
 	}
+	a.checkIPv6(ifc)
 	a.mu.Lock()
-	a.upDone, a.upKey = true, a.st.PrivateKey
+	a.upDone, a.upKey, a.upAddr6 = true, a.st.PrivateKey, ifc.Address6
 	a.mu.Unlock()
 	defer a.teardown()
 	a.mu.Lock()
@@ -466,6 +512,9 @@ func (a *Agent) reconcile() error {
 	a.mu.Lock()
 	ifc := a.iface()
 	rekey := a.upKey != a.st.PrivateKey
+	// The first netmap from a coordinator with IPv6 brings the interface's
+	// IPv6 address: Up runs again to add it.
+	reup := rekey || ifc.Address6 != a.upAddr6
 	nm := a.nm
 	if nm == nil {
 		a.mu.Unlock()
@@ -476,9 +525,14 @@ func (a *Agent) reconcile() error {
 	a.mu.Unlock()
 
 	var errs []error
-	if rekey {
+	if reup {
 		if err := a.o.Backend.Up(ifc); err != nil {
 			errs = append(errs, err)
+		} else {
+			a.checkIPv6(ifc)
+			a.mu.Lock()
+			a.upAddr6 = ifc.Address6
+			a.mu.Unlock()
 		}
 	}
 	// The access filter goes before the peers, so a peer the policy just
@@ -501,6 +555,14 @@ func (a *Agent) reconcile() error {
 		forward = false
 	}
 	errs = append(errs, a.o.Backend.SetForward(ifc.Name, nm.Subnet, forward))
+	if f6, ok := a.o.Backend.(wgctl.Forwarder6); ok && nm.Subnet6 != "" {
+		// IPv6 forwarding only for what needs it, an exit node or a shared
+		// IPv6 route: it makes Linux ignore router advertisements.
+		a.mu.Lock()
+		on := forward && ifc.Address6.IsValid() && (a.st.Exit || has6(a.st.Routes))
+		a.mu.Unlock()
+		errs = append(errs, f6.SetForward6(ifc.Name, nm.Subnet6, on))
+	}
 	if exitOn {
 		errs = append(errs, a.setBypass(ifc.Name, nm, peers))
 	}
@@ -522,8 +584,24 @@ func (a *Agent) reconcile() error {
 func (a *Agent) planLocked(nm *mesh.NetMap, stats map[string]wgctl.PeerStat, now time.Time) (
 	peers []wgctl.Peer, routes []string, exitOn, forward bool, hosts []HostEntry) {
 
-	hosts = append(hosts, HostEntry{Address: nm.Self.Address, Name: nm.Self.Name})
+	// IPv6 inside the mesh, when the coordinator has it: each device's /128
+	// next to its /32, the /64 through the relay and ::/0 next to 0.0.0.0/0.
+	six := nm.Subnet6 != ""
+	host6 := func(addr string) []string {
+		if six && addr != "" {
+			return []string{addr + "/128"}
+		}
+		return nil
+	}
+	defaults := []string{"0.0.0.0/0"}
+	if six {
+		defaults = append(defaults, "::/0")
+	}
+	hosts = appendHosts(hosts, nm.Self.Name, nm.Self.Address, nm.Self.Address6)
 	relayAllowed := []string{nm.Subnet}
+	if six {
+		relayAllowed = append(relayAllowed, nm.Subnet6)
+	}
 	exitName := a.st.ExitNode
 	a.exitNote = ""
 	exitFound := exitName == ""
@@ -540,7 +618,7 @@ func (a *Agent) planLocked(nm *mesh.NetMap, stats map[string]wgctl.PeerStat, now
 	}()
 
 	for _, n := range nm.Peers {
-		hosts = append(hosts, HostEntry{Address: n.Address, Name: n.Name})
+		hosts = appendHosts(hosts, n.Name, n.Address, n.Address6)
 		var peerRoutes []string
 		if !a.st.NoRoutes {
 			for _, r := range n.Routes {
@@ -599,9 +677,9 @@ func (a *Agent) planLocked(nm *mesh.NetMap, stats map[string]wgctl.PeerStat, now
 		}
 		wp := wgctl.Peer{PublicKey: n.PublicKey, Endpoint: p.endpoint, Keepalive: Keepalive}
 		if p.direct {
-			wp.AllowedIPs = append([]string{n.Address + "/32"}, peerRoutes...)
+			wp.AllowedIPs = append(append([]string{n.Address + "/32"}, host6(n.Address6)...), peerRoutes...)
 			if wantExit {
-				wp.AllowedIPs = append(wp.AllowedIPs, "0.0.0.0/0")
+				wp.AllowedIPs = append(wp.AllowedIPs, defaults...)
 				exitOn = true
 			}
 		} else {
@@ -614,6 +692,11 @@ func (a *Agent) planLocked(nm *mesh.NetMap, stats map[string]wgctl.PeerStat, now
 					relayAllowed = append(relayAllowed, "0.0.0.0/0")
 					exitOn = true
 					a.exitNote = "through the relay until a direct path to " + exitName + " answers"
+					if six {
+						// The relay carries IPv4 only for another device's
+						// exit; IPv6 internet traffic is held back, not leaked.
+						a.exitNote += "; IPv6 internet traffic is blocked until then"
+					}
 				} else {
 					a.exitNote = "waiting for a direct path to " + exitName + ", or for the relay to carry it; internet traffic stays local until then"
 				}
@@ -627,11 +710,11 @@ func (a *Agent) planLocked(nm *mesh.NetMap, stats map[string]wgctl.PeerStat, now
 		}
 	}
 	if nm.Relay != nil {
-		hosts = append(hosts, HostEntry{Address: nm.Relay.Address, Name: nm.Relay.Name})
+		hosts = appendHosts(hosts, nm.Relay.Name, nm.Relay.Address, nm.Relay.Address6)
 		if exitName == nm.Relay.Name {
 			exitFound = true
 			if nm.Relay.Exit {
-				relayAllowed = append(relayAllowed, "0.0.0.0/0")
+				relayAllowed = append(relayAllowed, defaults...)
 				exitOn = true
 			} else {
 				a.exitNote = "the relay is not an exit node (start wgh serve with --exit)"
@@ -649,6 +732,16 @@ func (a *Agent) planLocked(nm *mesh.NetMap, stats map[string]wgctl.PeerStat, now
 	return peers, routes, exitOn, forward, hosts
 }
 
+// appendHosts adds a device's names: one entry for its IPv4 address and,
+// when it has one, one for its IPv6 address.
+func appendHosts(hosts []HostEntry, name, addr, addr6 string) []HostEntry {
+	hosts = append(hosts, HostEntry{Address: addr, Name: name})
+	if addr6 != "" {
+		hosts = append(hosts, HostEntry{Address: addr6, Name: name})
+	}
+	return hosts
+}
+
 func dedupe(in []string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -662,7 +755,7 @@ func dedupe(in []string) []string {
 }
 
 // meshULA is the mesh's own IPv6 range, never offered as an endpoint.
-var meshULA = netip.MustParsePrefix("fd77:6768::/64")
+var meshULA = netip.MustParsePrefix(mesh.DefaultSubnet6)
 
 // localAddrs lists this machine's IPv4 and IPv6 addresses that another
 // device might reach: LAN addresses, and global IPv6 addresses, which other

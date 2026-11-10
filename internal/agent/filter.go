@@ -15,14 +15,23 @@ func inboundFilter(nm *mesh.NetMap) []wgctl.FilterRule {
 		return nil
 	}
 	rules := []wgctl.FilterRule{}
+	// The backend keeps the IPv6 rules in an IPv6 filter of their own, so
+	// the policy holds over IPv6 too.
+	src6 := func(addr6 string) {
+		if nm.Subnet6 != "" && addr6 != "" {
+			rules = append(rules, wgctl.FilterRule{Src: addr6 + "/128"})
+		}
+	}
 	if nm.Relay != nil && nm.Relay.Address != "" {
 		rules = append(rules, wgctl.FilterRule{Src: nm.Relay.Address + "/32"})
+		src6(nm.Relay.Address6)
 	}
 	for _, n := range nm.Peers {
 		if !n.CanConnect || n.Address == "" {
 			continue
 		}
 		rules = append(rules, wgctl.FilterRule{Src: n.Address + "/32"})
+		src6(n.Address6)
 		// Hosts on the LAN a peer shares count as that peer.
 		for _, r := range n.Routes {
 			rules = append(rules, wgctl.FilterRule{Src: r})

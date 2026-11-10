@@ -268,7 +268,11 @@ func printStatus(w io.Writer, s agent.Status) {
 			conn += ": " + s.LastError
 		}
 	}
-	fmt.Fprintf(w, "%s  %s  %s\n", s.Name, s.Address, conn)
+	addr := s.Address
+	if s.Address6 != "" {
+		addr += "  " + s.Address6
+	}
+	fmt.Fprintf(w, "%s  %s  %s\n", s.Name, addr, conn)
 	if s.DNS != "" {
 		fmt.Fprintf(w, "dns %s\n", s.DNS)
 	}

@@ -109,6 +109,16 @@ func addr(r *aclRig, name string) string {
 	return ""
 }
 
+func addr6(r *aclRig, name string) string {
+	for _, d := range r.srv.Status().Devices {
+		if d.Name == name {
+			return d.Address6 + "/128"
+		}
+	}
+	r.t.Fatalf("no device %s", name)
+	return ""
+}
+
 func TestACLNetMap(t *testing.T) {
 	r := newACLRig(t, testPolicy)
 	r.join("laptop", nil, false)
@@ -136,12 +146,15 @@ func TestACLNetMap(t *testing.T) {
 	}
 
 	// The relay forwards only allowed pairs, LAN routes included.
+	// Each pair is allowed over IPv4 and over IPv6, never across families.
 	laptop, pve1, nas, phone := addr(r, "laptop"), addr(r, "pve1"), addr(r, "nas"), addr(r, "phone")
+	laptop6, pve16, nas6, phone6 := addr6(r, "laptop"), addr6(r, "pve1"), addr6(r, "nas"), addr6(r, "phone")
 	want := []wgctl.FilterRule{
-		{Src: laptop, Dst: pve1}, {Src: laptop, Dst: "192.168.50.0/24"},
-		{Src: laptop, Dst: nas}, {Src: laptop, Dst: phone},
-		{Src: pve1, Dst: nas}, {Src: "192.168.50.0/24", Dst: nas},
-		{Src: phone, Dst: nas},
+		{Src: laptop, Dst: pve1}, {Src: laptop, Dst: "192.168.50.0/24"}, {Src: laptop6, Dst: pve16},
+		{Src: laptop, Dst: nas}, {Src: laptop6, Dst: nas6},
+		{Src: laptop, Dst: phone}, {Src: laptop6, Dst: phone6},
+		{Src: pve1, Dst: nas}, {Src: pve16, Dst: nas6}, {Src: "192.168.50.0/24", Dst: nas},
+		{Src: phone, Dst: nas}, {Src: phone6, Dst: nas6},
 	}
 	if got := r.srv.RelayFilter(); !slices.Equal(got, want) {
 		t.Fatalf("relay filter:\n%v\nwant:\n%v", got, want)
@@ -232,7 +245,7 @@ func TestACLHotReload(t *testing.T) {
 	if err := r.srv.syncRelay(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.relay.Snapshot().FilterRules; len(got) != 1 {
+	if got := r.relay.Snapshot().FilterRules; len(got) != 2 { // IPv4 and IPv6
 		t.Fatalf("relay filter after reload: %v", got)
 	}
 

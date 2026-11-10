@@ -134,7 +134,7 @@ func TestMeshDNS(t *testing.T) {
 	if rc, ips := dnsLookup(t, srv, "relay.wgh", 1); rc != 0 || len(ips) != 1 || ips[0].String() != r.srv.Status().Relay.Address {
 		t.Errorf("relay: rcode %d %v", rc, ips)
 	}
-	if rc, ips := dnsLookup(t, srv, "pve1.wgh", 28); rc != 0 || len(ips) != 0 {
+	if rc, ips := dnsLookup(t, srv, "pve1.wgh", 28); rc != 0 || len(ips) != 1 || ips[0].String() != "fd77:6768::a90:3" {
 		t.Errorf("AAAA: rcode %d %v", rc, ips)
 	}
 	if rc, _ := dnsLookup(t, srv, "example.com", 1); rc != 5 {

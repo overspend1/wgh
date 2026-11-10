@@ -18,8 +18,12 @@ const RouteTable = 5767
 
 // Interface describes the local WireGuard interface.
 type Interface struct {
-	Name       string
-	Address    netip.Prefix // e.g. 10.144.0.5/16
+	Name    string
+	Address netip.Prefix // e.g. 10.144.0.5/16
+	// Address6 is the IPv6 address inside the mesh with the mesh prefix
+	// length, e.g. fd77:6768::a90:5/64. The zero Prefix means none: the
+	// interface is IPv4 only, as with a coordinator from before IPv6.
+	Address6   netip.Prefix
 	ListenPort int
 	PrivateKey string
 	MTU        int
@@ -59,6 +63,32 @@ type Backend interface {
 	SetForward(name, subnet string, on bool) error
 	// Down removes the interface and everything set up for it.
 	Down(name string) error
+}
+
+// Forwarder6 is an optional Backend feature: forwarding and NAT of the
+// mesh's IPv6 range, the IPv6 half of SetForward. It is separate because
+// turning IPv6 forwarding on changes how the host treats router
+// advertisements, so callers ask for it only when they need it (an exit
+// node, or a shared IPv6 route). A backend whose interface has no IPv6
+// does nothing.
+type Forwarder6 interface {
+	SetForward6(name, subnet6 string, on bool) error
+}
+
+// IPv6Reporter is implemented by backends that can find IPv6 unusable on
+// the host. IPv6Off returns why interface name has no IPv6 address after
+// Up was asked for one, or nil. The interface then works over IPv4 only:
+// Up never fails because of IPv6.
+type IPv6Reporter interface {
+	IPv6Off(name string) error
+}
+
+// IPv6Off is b's IPv6Reporter answer, or nil for a backend without one.
+func IPv6Off(b Backend, name string) error {
+	if r, ok := b.(IPv6Reporter); ok {
+		return r.IPv6Off(name)
+	}
+	return nil
 }
 
 // SortedPeers returns peers ordered by public key with sorted AllowedIPs,
