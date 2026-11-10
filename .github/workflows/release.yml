@@ -1,8 +1,16 @@
 name: release
 
+# Runs when a v* tag is pushed, or by hand from the Actions tab
+# ("Run workflow", enter e.g. v0.1.0), which creates the tag on the
+# current commit of the chosen branch.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to create, e.g. v0.1.0"
+        required: true
 
 permissions:
   contents: write
@@ -10,6 +18,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -17,17 +27,29 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Check tag
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like v1.2.3, got '$TAG'"; exit 1 ;;
+          esac
+
       - name: Test
         run: go test ./...
 
       - name: Build
-        run: sh scripts/build-release.sh "$GITHUB_REF_NAME"
+        run: sh scripts/build-release.sh "$TAG"
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --generate-notes
+          fi
