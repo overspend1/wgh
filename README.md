@@ -1,18 +1,19 @@
 # wgh
 
-A small WireGuard helper for a home network. It creates the server and its
-peers, allocates tunnel addresses, generates keys, writes `wg-quick` configs
-and shows client configs as QR codes for the phone apps.
+A small WireGuard helper for a home network. Run `wgh` and you get a
+full-screen interface, in WireGuard red, that sets up the server, adds and
+removes peers, shows their configs and puts a QR code on screen for the phone
+apps. Every action is also a plain subcommand for scripts.
 
 It only ever writes files. It never touches a network interface, never calls
 `wg` or `ip`, and never needs root. You copy the server config to the box that
 runs WireGuard (an OpenWrt router, a Proxmox LXC, any Linux host) yourself.
 
-- Single static Go binary, two small dependencies
-  (`golang.org/x/crypto/curve25519` for keys, `skip2/go-qrcode` for QR codes).
+- Single static Go binary.
 - Keys are generated natively (Curve25519, clamped exactly like `wg genkey`).
 - State lives in one JSON file, mode `0600`, in a `0700` directory.
 - Every exported config and QR PNG is also written `0600`, atomically.
+- `wgh update` replaces itself with the latest release, checksum-verified.
 
 ## Install
 
@@ -68,7 +69,59 @@ Run the tests:
 go test ./...
 ```
 
-## Quick start
+## The interface
+
+```sh
+wgh                      # opens the TUI (uses ~/.config/wgh/state.json)
+wgh --state ./home.json  # another site
+```
+
+With no state file yet, it opens a setup form: endpoint, subnet, port,
+interface, DNS and NAT interface. Leave a field blank to take the default shown
+in grey. After that you land on the peer list.
+
+| Key | Action |
+| --- | --- |
+| `a` | add a peer; its QR code opens straight away |
+| `d` | remove the selected peer (asks first) |
+| `enter` | show the selected peer's client config |
+| `r` | show the selected peer's QR code |
+| `s` | show the server config |
+| `e` | export the server and all client configs to a directory |
+| `?` | help |
+| `q`, `esc` | back, or quit from the list |
+
+In forms, `tab` and the arrow keys move between fields, `space` flips a yes/no,
+`enter` on the last field (or `ctrl+s` anywhere) submits. On the QR screen,
+`p` saves a PNG of it to the current directory.
+
+The QR code is always drawn white on black so phones can scan it whatever your
+terminal theme. It needs a window of roughly 70 by 38; if yours is smaller, the
+screen says so and you can save the PNG instead.
+
+On start the TUI checks GitHub once for a newer release and shows a badge if
+there is one. It never installs anything by itself. Turn the check off with
+`wgh --no-update-check` or `WGH_NO_UPDATE_CHECK=1`.
+
+## Updating
+
+```sh
+wgh update          # download, verify and install the latest release
+wgh update --check  # only say whether there is one
+```
+
+`wgh update` finds the latest release of `overspend1/wgh`, downloads the
+binary for your OS and CPU, checks it against that release's `checksums.txt`,
+makes sure the new binary runs, then swaps it in atomically (following a
+symlink to the real file). If the download or the check fails, the old binary
+is left alone. It uses GitHub's plain download URLs, not the API, so it needs
+no token. A binary you built yourself reports version `dev` and is only
+replaced with `--force`.
+
+If wgh lives somewhere only root can write, such as `/usr/local/bin`, run
+`sudo wgh update`, or just run the install script again.
+
+## Quick start (subcommands)
 
 ```sh
 # 1. Create the server: a dynamic DNS name or public IP, plus the LAN
@@ -108,6 +161,8 @@ to apply without dropping existing sessions).
 | `wgh qr <name> [--png file]` | Print the client config as a terminal QR code; optionally save a PNG. |
 | `wgh server` | Print the server config. |
 | `wgh export --dir DIR [--qr]` | Write `DIR/<interface>.conf` and `DIR/peers/<name>.conf` (and PNGs). |
+| `wgh` or `wgh tui` | Open the full-screen interface. |
+| `wgh update [--check] [--force]` | Install the latest release, after verifying it. |
 | `wgh version` | Print the version. |
 
 Flags can go before or after the peer name. `wgh <command> -h` lists them.
@@ -189,8 +244,8 @@ peers; adding past that fails with a clear error.
   the one-scan QR flow work; if you would rather a device keep its own key,
   that is a small addition (an `--pubkey` flag on `add`).
 - QR codes contain the client's private key. Do not screenshot or share them.
-- If a phone cannot read the terminal QR, try `wgh qr <name> --invert`, or use
-  the PNG.
+- If a phone cannot read the QR printed by `wgh qr` on a light terminal, try
+  `wgh qr <name> --invert`, or use the PNG.
 
 ## Layout
 
@@ -203,4 +258,7 @@ internal/keys/      key generation (tested against RFC 7748 vectors)
 internal/ipam/      address allocation
 internal/state/     JSON state, 0600 atomic writes
 internal/render/    server and client .conf rendering
+internal/app/       operations shared by the CLI and the TUI
+internal/tui/       Bubble Tea interface and the red theme
+internal/update/    self-update from GitHub releases
 ```
