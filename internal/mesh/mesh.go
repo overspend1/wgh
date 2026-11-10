@@ -185,6 +185,9 @@ type UpdateRequest struct {
 	Version    string   `json:"version,omitempty"`
 	RxBytes    int64    `json:"rx_bytes,omitempty"`
 	TxBytes    int64    `json:"tx_bytes,omitempty"`
+	// ExitViaRelay names the exit node this device wants but has no direct
+	// path to, asking the relay to carry its internet traffic there.
+	ExitViaRelay string `json:"exit_via_relay,omitempty"`
 }
 
 // Node is one device as the rest of the mesh sees it.
@@ -239,6 +242,10 @@ type NetMap struct {
 	// and the device lets in new connections only from peers with
 	// CanConnect. Unset, every peer may connect and nothing is filtered.
 	ACL bool `json:"acl,omitempty"`
+	// RelayExit is set when the relay carries this device's internet
+	// traffic to that exit node, because the device has no direct path to
+	// it. The relay does this for one exit node at a time.
+	RelayExit string `json:"relay_exit,omitempty"`
 }
 
 // ErrorResponse is the body of every non-2xx reply.

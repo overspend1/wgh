@@ -45,6 +45,7 @@ type Linux struct {
 	forward string // subnet forwarded, if any
 	natIf   string
 	filters map[string]*filterState // by interface, see SetFilter
+	sources []string                // see SetSourceRoutes
 }
 
 // NewLinux returns a Linux backend that runs real commands.
@@ -278,6 +279,10 @@ func (l *Linux) Down(name string) error {
 	if f := l.filters[name]; f != nil {
 		l.filterOff(name, f.scope)
 		delete(l.filters, name)
+	}
+	if l.sources != nil {
+		l.sourcesOff()
+		l.sources = nil
 	}
 	l.routes = nil
 	l.mu.Unlock()

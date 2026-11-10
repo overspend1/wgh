@@ -86,6 +86,9 @@ type Server struct {
 	changed  chan struct{}
 	relayCfg []wgctl.Peer
 	acl      aclState
+	// relaySrc is what syncRelaySources last applied.
+	relaySrc    []string
+	relaySrcSet bool
 }
 
 // New loads or creates the coordinator state in o.Dir.
@@ -343,6 +346,9 @@ func (s *Server) Update(apiKey string, req mesh.UpdateRequest, seenIP string) er
 	if req.Exit != d.Exit {
 		d.Exit, changed = req.Exit, true
 	}
+	if req.ExitViaRelay != d.WantRelayExit {
+		d.WantRelayExit, changed = req.ExitViaRelay, true
+	}
 	if d.AutoApprove {
 		if !slices.Equal(d.ApprovedRoutes, d.Routes) || d.ExitApproved != d.Exit {
 			d.ApprovedRoutes, d.ExitApproved, changed = append([]string(nil), d.Routes...), d.Exit, true
@@ -591,6 +597,9 @@ func (s *Server) NetMap(apiKey string) (mesh.NetMap, <-chan struct{}, error) {
 		}
 	}
 	nm.ACL = !s.policyLocked().IsAllowAll()
+	if exit, users := s.relayExitLocked(); exit != nil && slices.Contains(users, d) {
+		nm.RelayExit = exit.Name
+	}
 	return nm, s.changed, nil
 }
 
@@ -665,11 +674,55 @@ func (s *Server) Sweep() {
 }
 
 // relayPeersLocked is the relay's desired WireGuard peer list.
+// relayExitLocked picks the exit node the relay carries traffic to for
+// devices without a direct path to it, and the devices it does that for.
+// WireGuard on the relay sends 0.0.0.0/0 to one peer only, so it is one
+// exit node at a time: the one the most devices ask for.
+func (s *Server) relayExitLocked() (exit *device, users []*device) {
+	if s.o.NoRelay {
+		return nil, nil
+	}
+	p := s.policyLocked()
+	want := map[*device][]*device{}
+	for _, d := range s.st.Devices {
+		if d.WantRelayExit == "" || d.Static || !d.Online {
+			continue
+		}
+		t, _ := s.findLocked(d.WantRelayExit)
+		if t == nil || t == d || t.Static || !t.Exit || !t.ExitApproved || !p.Allows(d.Name, t.Name) {
+			continue
+		}
+		want[t] = append(want[t], d)
+	}
+	for t, u := range want {
+		if exit == nil || len(u) > len(users) || (len(u) == len(users) && t.Name < exit.Name) {
+			exit, users = t, u
+		}
+	}
+	return exit, users
+}
+
+// relaySourcesLocked lists the addresses whose internet traffic the relay
+// sends to the relayed exit node.
+func (s *Server) relaySourcesLocked() []string {
+	_, users := s.relayExitLocked()
+	var out []string
+	for _, u := range users {
+		out = append(out, u.Address+"/32")
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *Server) relayPeersLocked() []wgctl.Peer {
 	var peers []wgctl.Peer
+	exit, _ := s.relayExitLocked()
 	for _, d := range s.st.Devices {
 		allowed := []string{d.Address + "/32"}
 		allowed = append(allowed, d.ApprovedRoutes...)
+		if d == exit {
+			allowed = append(allowed, "0.0.0.0/0")
+		}
 		peers = append(peers, wgctl.Peer{PublicKey: d.PublicKey, AllowedIPs: allowed})
 	}
 	return peers
@@ -689,6 +742,9 @@ func (s *Server) syncRelay() error {
 		return nil
 	}
 	ferr := s.syncRelayFilter()
+	if serr := s.syncRelaySources(); serr != nil {
+		ferr = errors.Join(ferr, serr)
+	}
 	s.mu.Lock()
 	peers := s.relayPeersLocked()
 	ifc := s.relayInterface()
@@ -750,6 +806,31 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { errc <- api.Serve(ln) }()
 	go func() { errc <- admin.Serve(aln) }()
 	s.o.Logf("coordinator listening on %s (public URL %s)", s.o.Listen, s.o.URL)
+
+	// Apply relay changes as they happen, not only on the next tick, so a
+	// new device or a relayed exit node works within a second.
+	if !s.o.NoRelay {
+		go func() {
+			for {
+				s.mu.Lock()
+				ch := s.changed
+				s.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return
+				case <-ch:
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(50 * time.Millisecond): // let a burst of changes settle
+				}
+				if err := s.syncRelay(); err != nil {
+					s.o.Logf("relay: %v", err)
+				}
+			}
+		}()
+	}
 
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
@@ -972,4 +1053,27 @@ func (s *Server) AdminHandler() http.Handler {
 		return map[string]string{"config": conf}, err
 	}))
 	return mux
+}
+
+// syncRelaySources points the internet traffic of devices using the relayed
+// exit node into the relay interface, where WireGuard hands it to that node.
+func (s *Server) syncRelaySources() error {
+	sr, ok := s.o.Backend.(wgctl.SourceRouter)
+	if !ok {
+		return nil
+	}
+	s.mu.Lock()
+	src := s.relaySourcesLocked()
+	same := s.relaySrcSet && slices.Equal(src, s.relaySrc)
+	s.mu.Unlock()
+	if same {
+		return nil
+	}
+	if err := sr.SetSourceRoutes(s.o.Interface, src); err != nil {
+		return fmt.Errorf("relayed exit node: %w", err)
+	}
+	s.mu.Lock()
+	s.relaySrc, s.relaySrcSet = src, true
+	s.mu.Unlock()
+	return nil
 }

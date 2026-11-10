@@ -159,6 +159,10 @@ type Agent struct {
 	upDone    bool
 	upKey     string
 	wake      chan struct{}
+	hbWake    chan struct{} // send a heartbeat now
+	// relayExit is the exit node this device asks the relay to reach,
+	// because it has no direct path there.
+	relayExit string
 	stop      context.CancelFunc
 	dnsOn     bool
 
@@ -195,7 +199,7 @@ func New(o Options) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &Agent{o: o, st: *st, paths: map[string]*path{}, wake: make(chan struct{}, 1),
+	a := &Agent{o: o, st: *st, paths: map[string]*path{}, wake: make(chan struct{}, 1), hbWake: make(chan struct{}, 1),
 		noForward: wgctl.CanForward(o.Backend), res: resolver{lookup: o.LookupIP}}
 	a.client = NewClient(st.URL, st.Pin, st.APIKey)
 	if o.HTTP != nil {
@@ -355,6 +359,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
+		case <-a.hbWake:
 		}
 	}
 }
@@ -362,7 +367,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) error {
 func (a *Agent) heartbeat(ctx context.Context, newPub string) error {
 	a.mu.Lock()
 	req := mesh.UpdateRequest{ListenPort: a.st.ListenPort, Routes: a.st.Routes, Exit: a.st.Exit,
-		PublicKey: newPub, OS: runtime.GOOS, Version: a.o.Version}
+		PublicKey: newPub, OS: runtime.GOOS, Version: a.o.Version, ExitViaRelay: a.relayExit}
 	if a.noForward != nil {
 		req.Routes, req.Exit = nil, false // nothing to offer: this system can't forward
 	}
@@ -515,6 +520,16 @@ func (a *Agent) planLocked(nm *mesh.NetMap, stats map[string]wgctl.PeerStat, now
 	a.exitNote = ""
 	exitFound := exitName == ""
 	seen := map[string]bool{}
+	relayExit := ""
+	defer func() {
+		if relayExit != a.relayExit {
+			a.relayExit = relayExit
+			select {
+			case a.hbWake <- struct{}{}:
+			default:
+			}
+		}
+	}()
 
 	for _, n := range nm.Peers {
 		hosts = append(hosts, HostEntry{Address: n.Address, Name: n.Name})
@@ -584,7 +599,16 @@ func (a *Agent) planLocked(nm *mesh.NetMap, stats map[string]wgctl.PeerStat, now
 		} else {
 			relayAllowed = append(relayAllowed, peerRoutes...)
 			if wantExit {
-				a.exitNote = "waiting for a direct path to " + exitName + "; internet traffic stays local until then"
+				// Ask the relay to carry it there; it does that for one exit
+				// node at a time.
+				relayExit = exitName
+				if nm.RelayExit == exitName {
+					relayAllowed = append(relayAllowed, "0.0.0.0/0")
+					exitOn = true
+					a.exitNote = "through the relay until a direct path to " + exitName + " answers"
+				} else {
+					a.exitNote = "waiting for a direct path to " + exitName + ", or for the relay to carry it; internet traffic stays local until then"
+				}
 			}
 		}
 		peers = append(peers, wp)

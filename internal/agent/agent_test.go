@@ -217,10 +217,12 @@ func TestMeshEndToEnd(t *testing.T) {
 	if !slices.Contains(relayPeer.AllowedIPs, "10.144.0.0/16") || !slices.Contains(relayPeer.AllowedIPs, "192.168.50.0/24") {
 		t.Fatalf("relay peer = %+v", relayPeer)
 	}
-	if a.fake.Snapshot().Exit {
-		t.Error("exit through a relayed device should be off")
-	}
-	if st := a.a.Status(); !strings.Contains(st.ExitNote, "waiting for a direct path") {
+	// The relay carries laptop's internet traffic on to pve1.
+	eventually(t, "exit through the relay", func() bool {
+		rp, _ := a.fake.Snapshot().Peer(r.srv.Status().Relay.PublicKey)
+		return a.fake.Snapshot().Exit && slices.Contains(rp.AllowedIPs, "0.0.0.0/0")
+	})
+	if st := a.a.Status(); !strings.Contains(st.ExitNote, "through the relay") {
 		t.Errorf("exit note = %q", st.ExitNote)
 	}
 

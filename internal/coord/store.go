@@ -53,10 +53,13 @@ type device struct {
 	AutoApprove    bool     `json:"auto_approve,omitempty"`
 
 	// Runtime facts, refreshed by heartbeats and the relay.
-	LastSeen      time.Time `json:"last_seen,omitempty"`
-	ListenPort    int       `json:"listen_port,omitempty"`
-	Local         []string  `json:"local_endpoints,omitempty"`
-	SeenIP        string    `json:"seen_ip,omitempty"`
+	LastSeen   time.Time `json:"last_seen,omitempty"`
+	ListenPort int       `json:"listen_port,omitempty"`
+	Local      []string  `json:"local_endpoints,omitempty"`
+	SeenIP     string    `json:"seen_ip,omitempty"`
+	// WantRelayExit is the exit node this device asks the relay to reach
+	// for it (runtime only).
+	WantRelayExit string    `json:"-"`
 	RelayEndpoint string    `json:"relay_endpoint,omitempty"`
 	RelayHS       time.Time `json:"relay_handshake,omitempty"`
 	Online        bool      `json:"-"`

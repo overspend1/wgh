@@ -160,6 +160,11 @@ func (s *Server) relayFilterLocked() []wgctl.FilterRule {
 		return nil
 	}
 	rules := []wgctl.FilterRule{}
+	// Devices using the relayed exit node send internet traffic through
+	// the relay; the exit node was checked against the policy already.
+	for _, src := range s.relaySourcesLocked() {
+		rules = append(rules, wgctl.FilterRule{Src: src})
+	}
 	for _, a := range s.st.Devices {
 		for _, b := range s.st.Devices {
 			if a == b || !p.Allows(a.Name, b.Name) {

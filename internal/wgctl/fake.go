@@ -57,6 +57,7 @@ type Fake struct {
 	filterOn    bool
 	filterScope FilterScope
 	filter      []FilterRule
+	sources     []string
 }
 
 // NewFake returns a fake backend, optionally attached to a network.
@@ -293,6 +294,7 @@ type Snapshot struct {
 	Filter      bool
 	FilterScope FilterScope
 	FilterRules []FilterRule
+	Sources     []string // last SetSourceRoutes
 }
 
 // Snapshot returns the current configuration.
@@ -302,7 +304,8 @@ func (f *Fake) Snapshot() Snapshot {
 	s := Snapshot{Up: f.ifc != nil, Peers: append([]Peer(nil), f.peers...),
 		Routes: append([]string(nil), f.routes...), Exit: f.exit, Forward: f.forward,
 		Bypass: append([]netip.Addr(nil), f.bypass...),
-		Filter: f.filterOn, FilterScope: f.filterScope, FilterRules: append([]FilterRule(nil), f.filter...)}
+		Filter: f.filterOn, FilterScope: f.filterScope, FilterRules: append([]FilterRule(nil), f.filter...),
+		Sources: append([]string(nil), f.sources...)}
 	if f.ifc != nil {
 		s.Address = f.ifc.Address
 	}
